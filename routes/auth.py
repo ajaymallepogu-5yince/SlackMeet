@@ -40,3 +40,5 @@ def callback(request: Request):
     user_tokens["default"] = credentials
 
     return {"message": "Google connected ✅"}
+
+print("REDIRECT URI:", f"{BASE_URL}/callback")
