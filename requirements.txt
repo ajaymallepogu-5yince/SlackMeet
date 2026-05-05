@@ -8,3 +8,11 @@ fastapi
 uvicorn
 requests
 python-multipart
+
+fastapi
+uvicorn
+requests
+python-multipart
+google-api-python-client
+google-auth
+google-auth-oauthlib
