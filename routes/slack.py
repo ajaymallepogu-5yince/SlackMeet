@@ -2,6 +2,7 @@ from fastapi import APIRouter, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 import requests
+from models.user_token import UserToken
 
 from core.database import SessionLocal
 from models.user_token import UserToken
