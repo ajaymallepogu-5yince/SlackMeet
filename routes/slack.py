@@ -1,9 +1,12 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from storage.tokens import user_tokens
+from core.database import SessionLocal
+from models.user import UserToken
 from services.google import create_meeting
 
 router = APIRouter()
+
+BASE_URL = "https://slackmeet-production.up.railway.app"
 
 
 @router.post("/meet")
@@ -13,26 +16,22 @@ async def meet(request: Request):
     user_id = form.get("user_id")
     text = (form.get("text") or "").lower()
 
-    BASE_URL = "https://slackmeet-production.up.railway.app"
+    db = SessionLocal()
+    user = db.query(UserToken).filter(UserToken.user_id == user_id).first()
+    db.close()
 
-    # 🔥 instant keywords
     instant_keywords = ["connect", "meet", "call", "phone"]
 
-    # ================================
-    # 🚀 SCENARIO 2 → INSTANT MEETING
-    # ================================
+    # 🚀 INSTANT MEETING
     if any(word in text for word in instant_keywords):
 
-        if user_id not in user_tokens:
+        if not user:
             return JSONResponse({
                 "response_type": "ephemeral",
                 "blocks": [
                     {
                         "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": "⚠️ Connect Google first"
-                        }
+                        "text": {"type": "mrkdwn", "text": "⚠️ Connect Google first"}
                     },
                     {
                         "type": "actions",
@@ -54,20 +53,14 @@ async def meet(request: Request):
             "text": f"📞 Instant meeting ready: {meet_link}"
         })
 
-    # ======================================
-    # 🎯 SCENARIO 1 → SHOW BUTTONS
-    # ======================================
-
-    if user_id not in user_tokens:
+    # 🎯 SHOW BUTTONS
+    if not user:
         return JSONResponse({
             "response_type": "ephemeral",
             "blocks": [
                 {
                     "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": "⚠️ Connect your Google account first"
-                    }
+                    "text": {"type": "mrkdwn", "text": "⚠️ Connect your Google account first"}
                 },
                 {
                     "type": "actions",
@@ -87,10 +80,7 @@ async def meet(request: Request):
         "blocks": [
             {
                 "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": "What would you like to do?"
-                }
+                "text": {"type": "mrkdwn", "text": "What would you like to do?"}
             },
             {
                 "type": "actions",

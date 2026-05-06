@@ -1,13 +1,28 @@
 from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
 from datetime import datetime, timedelta
-from storage.tokens import user_tokens
+
+from core.database import SessionLocal
+from models.user import UserToken
 
 
 def create_meeting(user_id: str):
-    credentials = user_tokens.get(user_id)
+    db = SessionLocal()
 
-    if not credentials:
+    user = db.query(UserToken).filter(UserToken.user_id == user_id).first()
+    db.close()
+
+    if not user:
         return None
+
+    credentials = Credentials(
+        token=user.access_token,
+        refresh_token=user.refresh_token,
+        token_uri=user.token_uri,
+        client_id=user.client_id,
+        client_secret=user.client_secret,
+        scopes=user.scopes.split(","),
+    )
 
     service = build("calendar", "v3", credentials=credentials)
 
