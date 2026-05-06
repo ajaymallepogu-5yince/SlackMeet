@@ -4,7 +4,7 @@ from google_auth_oauthlib.flow import Flow
 
 from core.config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, BASE_URL, SCOPES
 from core.database import SessionLocal
-from models.user import UserToken
+from models.user_token import UserToken
 
 router = APIRouter()
 

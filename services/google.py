@@ -3,7 +3,7 @@ from google.oauth2.credentials import Credentials
 from datetime import datetime, timedelta
 
 from core.database import SessionLocal
-from models.user import UserToken
+from models.user_token import UserToken
 
 
 def create_meeting(user_id: str):

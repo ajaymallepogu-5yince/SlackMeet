@@ -5,7 +5,6 @@ import requests
 from models.user_token import UserToken
 
 from core.database import SessionLocal
-from models.user_token import UserToken
 from services.google import create_meeting
 
 router = APIRouter()
