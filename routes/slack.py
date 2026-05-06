@@ -9,37 +9,25 @@ from services.google import create_meeting
 router = APIRouter()
 
 
-# ✅ Proper DB session handler
-def get_db():
-    db = SessionLocal()
-    try:
-        return db
-    finally:
-        db.close()
-
-
 @router.post("/meet")
 async def meet(request: Request):
     try:
-        # ✅ Read Slack form data
         form = await request.form()
 
         user_id = form.get("user_id")
         text = (form.get("text") or "").lower()
 
-        print("DEBUG → user_id:", user_id)
-        print("DEBUG → text:", text)
+        print("DEBUG user_id:", user_id)
+        print("DEBUG text:", text)
 
-        # ❌ If Slack didn't send user_id
         if not user_id:
             return JSONResponse({
                 "response_type": "ephemeral",
-                "text": "❌ user_id missing from request"
+                "text": "❌ user_id missing"
             })
 
         instant_keywords = ["connect", "meet", "call", "phone"]
 
-        # ✅ DB connection
         db: Session = SessionLocal()
 
         user = db.query(UserToken).filter(UserToken.user_id == user_id).first()
@@ -52,7 +40,7 @@ async def meet(request: Request):
             if not user:
                 return JSONResponse({
                     "response_type": "ephemeral",
-                    "text": "⚠️ Please connect Google first"
+                    "text": f"⚠️ Please connect Google first:\nhttps://slackmeet-production.up.railway.app/auth?user_id={user_id}"
                 })
 
             meet_link = create_meeting(user)
@@ -88,14 +76,14 @@ async def meet(request: Request):
                             {
                                 "type": "button",
                                 "text": {"type": "plain_text", "text": "Connect Google"},
-                                "url": "https://slackmeet-production.up.railway.app/auth"
+                                "url": f"https://slackmeet-production.up.railway.app/auth?user_id={user_id}"
                             }
                         ]
                     }
                 ]
             })
 
-        # ✅ Already connected → show options
+        # ✅ Connected → show options
         return JSONResponse({
             "response_type": "ephemeral",
             "blocks": [
@@ -112,7 +100,7 @@ async def meet(request: Request):
                         {
                             "type": "button",
                             "text": {"type": "plain_text", "text": "⚡ Connect Now"},
-                            "url": "https://slackmeet-production.up.railway.app/instant-meet"
+                            "url": f"https://slackmeet-production.up.railway.app/instant-meet?user_id={user_id}"
                         },
                         {
                             "type": "button",
@@ -125,7 +113,7 @@ async def meet(request: Request):
         })
 
     except Exception as e:
-        print("🔥 ERROR IN /meet:", str(e))
+        print("🔥 ERROR:", str(e))
 
         return JSONResponse({
             "response_type": "ephemeral",
