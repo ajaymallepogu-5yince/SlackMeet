@@ -9,10 +9,11 @@ from services.google import create_meeting
 router = APIRouter()
 
 
+# ✅ Proper DB session handler
 def get_db():
     db = SessionLocal()
     try:
-        yield db
+        return db
     finally:
         db.close()
 
@@ -20,14 +21,26 @@ def get_db():
 @router.post("/meet")
 async def meet(request: Request):
     try:
+        # ✅ Read Slack form data
         form = await request.form()
 
         user_id = form.get("user_id")
         text = (form.get("text") or "").lower()
 
+        print("DEBUG → user_id:", user_id)
+        print("DEBUG → text:", text)
+
+        # ❌ If Slack didn't send user_id
+        if not user_id:
+            return JSONResponse({
+                "response_type": "ephemeral",
+                "text": "❌ user_id missing from request"
+            })
+
         instant_keywords = ["connect", "meet", "call", "phone"]
 
-        db: Session = next(get_db())
+        # ✅ DB connection
+        db: Session = SessionLocal()
 
         user = db.query(UserToken).filter(UserToken.user_id == user_id).first()
 
@@ -66,7 +79,7 @@ async def meet(request: Request):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": "⚠️ Connect Google first"
+                            "text": "⚠️ Connect your Google account first"
                         }
                     },
                     {
@@ -82,6 +95,7 @@ async def meet(request: Request):
                 ]
             })
 
+        # ✅ Already connected → show options
         return JSONResponse({
             "response_type": "ephemeral",
             "blocks": [
@@ -89,7 +103,7 @@ async def meet(request: Request):
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": "What do you want to do?"
+                        "text": "What would you like to do?"
                     }
                 },
                 {
