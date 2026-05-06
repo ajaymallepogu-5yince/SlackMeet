@@ -5,6 +5,7 @@ from services.google import create_meeting
 
 router = APIRouter()
 
+
 @router.post("/meet")
 async def meet(request: Request):
     form = await request.form()
@@ -12,24 +13,41 @@ async def meet(request: Request):
     user_id = form.get("user_id")
     text = (form.get("text") or "").lower()
 
-    # 🔥 keywords for instant meeting
+    BASE_URL = "https://slackmeet-production.up.railway.app"
+
+    # 🔥 instant keywords
     instant_keywords = ["connect", "meet", "call", "phone"]
 
     # ================================
-    # ✅ SCENARIO 2 → INSTANT MEETING
+    # 🚀 SCENARIO 2 → INSTANT MEETING
     # ================================
     if any(word in text for word in instant_keywords):
 
-        # ❌ not connected → force auth
         if user_id not in user_tokens:
             return JSONResponse({
                 "response_type": "ephemeral",
-                "text": "⚠️ Please connect Google first: https://slackmeet-production.up.railway.app/auth"
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "⚠️ Connect Google first"
+                        }
+                    },
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "Connect Google"},
+                                "url": f"{BASE_URL}/auth?user_id={user_id}"
+                            }
+                        ]
+                    }
+                ]
             })
 
-        # ✅ create meeting directly
-        credentials = user_tokens[user_id]
-        meet_link = create_meeting(credentials)
+        meet_link = create_meeting(user_id)
 
         return JSONResponse({
             "response_type": "in_channel",
@@ -37,10 +55,9 @@ async def meet(request: Request):
         })
 
     # ======================================
-    # ✅ SCENARIO 1 → SHOW BUTTONS ALWAYS
+    # 🎯 SCENARIO 1 → SHOW BUTTONS
     # ======================================
 
-    # ❌ Not connected → show connect button first
     if user_id not in user_tokens:
         return JSONResponse({
             "response_type": "ephemeral",
@@ -58,14 +75,13 @@ async def meet(request: Request):
                         {
                             "type": "button",
                             "text": {"type": "plain_text", "text": "Connect Google"},
-                            "url": "https://slackmeet-production.up.railway.app/auth"
+                            "url": f"{BASE_URL}/auth?user_id={user_id}"
                         }
                     ]
                 }
             ]
         })
 
-    # ✅ Already connected → show action buttons
     return JSONResponse({
         "response_type": "ephemeral",
         "blocks": [
@@ -82,7 +98,7 @@ async def meet(request: Request):
                     {
                         "type": "button",
                         "text": {"type": "plain_text", "text": "⚡ Connect Now"},
-                        "url": "https://slackmeet-production.up.railway.app/instant-meet"
+                        "url": f"{BASE_URL}/instant-meet?user_id={user_id}"
                     },
                     {
                         "type": "button",

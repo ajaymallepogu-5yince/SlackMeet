@@ -25,13 +25,13 @@ def get_flow():
 
 
 @router.get("/auth")
-def auth():
+def auth(user_id: str):
     flow = get_flow()
 
     auth_url, _ = flow.authorization_url(prompt="consent")
 
-    # ✅ Store flow (fixes "missing code verifier")
-    flows["default"] = flow
+    # ✅ store flow per user
+    flows[user_id] = flow
 
     return RedirectResponse(auth_url)
 
@@ -39,16 +39,18 @@ def auth():
 @router.get("/callback")
 def callback(request: Request):
     code = request.query_params.get("code")
+    user_id = request.query_params.get("state")  # 👈 IMPORTANT
 
-    flow = flows.get("default")
+    flow = flows.get(user_id)
 
     if not flow:
-        return {"error": "Flow not found. Please retry login."}
+        return {"error": "Flow not found. Retry login."}
 
     flow.fetch_token(code=code)
 
     credentials = flow.credentials
 
-    user_tokens["default"] = credentials
+    # ✅ store user token properly
+    user_tokens[user_id] = credentials
 
-    return {"message": "Google connected ✅"}
+    return {"message": f"Google connected for {user_id} ✅"}

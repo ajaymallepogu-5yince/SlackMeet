@@ -1,11 +1,10 @@
 from googleapiclient.discovery import build
 from datetime import datetime, timedelta
-
 from storage.tokens import user_tokens
 
 
-def create_meeting():
-    credentials = user_tokens.get("default")
+def create_meeting(user_id: str):
+    credentials = user_tokens.get(user_id)
 
     if not credentials:
         return None
@@ -28,14 +27,10 @@ def create_meeting():
         },
     }
 
-    event = (
-        service.events()
-        .insert(
-            calendarId="primary",
-            body=event,
-            conferenceDataVersion=1,
-        )
-        .execute()
-    )
+    event = service.events().insert(
+        calendarId="primary",
+        body=event,
+        conferenceDataVersion=1,
+    ).execute()
 
     return event.get("hangoutLink")
