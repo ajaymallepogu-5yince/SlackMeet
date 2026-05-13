@@ -1,17 +1,12 @@
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from datetime import datetime, timedelta
 
-from core.database import SessionLocal
 from models.user_token import UserToken
 
 
-def create_meeting(user_id: str):
-    db = SessionLocal()
-
-    user = db.query(UserToken).filter(UserToken.user_id == user_id).first()
-    db.close()
-
+def create_meeting(user: UserToken):
     if not user:
         return None
 
@@ -23,6 +18,10 @@ def create_meeting(user_id: str):
         client_secret=user.client_secret,
         scopes=user.scopes.split(","),
     )
+
+    # Refresh token if expired
+    if credentials.expired and credentials.refresh_token:
+        credentials.refresh(Request())
 
     service = build("calendar", "v3", credentials=credentials)
 
@@ -36,7 +35,7 @@ def create_meeting(user_id: str):
         },
         "conferenceData": {
             "createRequest": {
-                "requestId": "random-string",
+                "requestId": f"meet-{user.user_id}-{int(datetime.utcnow().timestamp())}",
                 "conferenceSolutionKey": {"type": "hangoutsMeet"},
             }
         },
