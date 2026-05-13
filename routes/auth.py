@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 from google_auth_oauthlib.flow import Flow
 
 from core.config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, BASE_URL, SCOPES
@@ -8,8 +8,12 @@ from models.user_token import UserToken
 
 router = APIRouter()
 
+# Store active flows keyed by user_id so the code_verifier survives
+# between /auth and /callback
+_flows: dict[str, Flow] = {}
 
-def get_flow():
+
+def make_flow() -> Flow:
     return Flow.from_client_config(
         {
             "web": {
@@ -26,12 +30,16 @@ def get_flow():
 
 @router.get("/auth")
 def auth(user_id: str):
-    flow = get_flow()
+    flow = make_flow()
 
     auth_url, _ = flow.authorization_url(
         prompt="consent",
-        state=user_id  # pass user_id safely
+        access_type="offline",
+        state=user_id,
     )
+
+    # Persist the flow so fetch_token can reuse the same session/verifier
+    _flows[user_id] = flow
 
     return RedirectResponse(auth_url)
 
@@ -41,27 +49,36 @@ def callback(request: Request):
     code = request.query_params.get("code")
     user_id = request.query_params.get("state")
 
-    flow = get_flow()
-    flow.fetch_token(code=code)
+    if not user_id or not code:
+        return JSONResponse({"error": "Missing code or state"}, status_code=400)
 
+    flow = _flows.pop(user_id, None)
+    if flow is None:
+        # Fallback: build a fresh flow (won't have verifier, but avoids a hard crash)
+        return JSONResponse(
+            {"error": "OAuth session expired or not found. Please try /auth again."},
+            status_code=400,
+        )
+
+    flow.fetch_token(code=code)
     credentials = flow.credentials
 
     db = SessionLocal()
+    try:
+        user = db.query(UserToken).filter(UserToken.user_id == user_id).first()
+        if not user:
+            user = UserToken(user_id=user_id)
 
-    user = db.query(UserToken).filter(UserToken.user_id == user_id).first()
+        user.access_token = credentials.token
+        user.refresh_token = credentials.refresh_token
+        user.token_uri = credentials.token_uri
+        user.client_id = credentials.client_id
+        user.client_secret = credentials.client_secret
+        user.scopes = ",".join(credentials.scopes)
 
-    if not user:
-        user = UserToken(user_id=user_id)
-
-    user.access_token = credentials.token
-    user.refresh_token = credentials.refresh_token
-    user.token_uri = credentials.token_uri
-    user.client_id = credentials.client_id
-    user.client_secret = credentials.client_secret
-    user.scopes = ",".join(credentials.scopes)
-
-    db.add(user)
-    db.commit()
-    db.close()
+        db.add(user)
+        db.commit()
+    finally:
+        db.close()
 
     return {"message": "Google connected ✅"}
