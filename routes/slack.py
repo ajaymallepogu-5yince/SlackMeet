@@ -50,7 +50,8 @@ async def slack_post(bot_token: str, channel: str, text: str = None, blocks: lis
 
 async def slack_respond(response_url: str, payload: dict):
     async with httpx.AsyncClient() as client:
-        await client.post(response_url, json=payload, timeout=10)
+        resp = await client.post(response_url, json=payload, timeout=10)
+        print("DEBUG slack_respond status=" + str(resp.status_code) + " body=" + resp.text[:200])
 
 
 # ─────────────────────────────────────────────
