@@ -3,6 +3,7 @@ from core.database import init_db
 from routes.auth import router as auth_router
 from routes.slack import router as slack_router
 from routes.slack_install import router as install_router
+import models.user_token  # ensure all models are registered with Base before create_all
 
 app = FastAPI(title="MeetNow")
 
