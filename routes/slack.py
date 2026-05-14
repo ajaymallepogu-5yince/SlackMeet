@@ -50,10 +50,52 @@ def get_token(team_id: str) -> str | None:
         db.close()
 
 
-def extract_mentioned_user(text: str) -> str | None:
-    """Pull the first <@UXXXXXXX> user ID out of slash command text."""
-    match = re.search(r"<@([A-Z0-9]+)(?:\|[^>]*)?>", text)
-    return match.group(1) if match else None
+def extract_mentioned_user(text: str) -> tuple[str | None, str | None]:
+    """
+    Returns (user_id, raw_username).
+    Proper mention <@UXXXXXX|name> → (user_id, name)
+    Plain text @username           → (None, username)
+    """
+    match = re.search(r"<@([A-Z0-9]+)(?:\|([^>]*)?)?>", text)
+    if match:
+        return match.group(1), match.group(2) or ""
+    match = re.search(r"@([\w.]+)", text)
+    if match:
+        return None, match.group(1)
+    return None, None
+
+
+async def resolve_user_id(bot_token: str, user_id: str | None, username: str | None) -> str | None:
+    """Turn a username into a Slack user ID if we only have the name."""
+    if user_id:
+        return user_id
+    if not username:
+        return None
+    result = await slack_api(bot_token, "users.list", {})
+    for member in result.get("members", []):
+        if member.get("deleted") or member.get("is_bot"):
+            continue
+        profile = member.get("profile", {})
+        names = {
+            (profile.get("display_name") or "").lower(),
+            (profile.get("real_name") or "").lower(),
+            (member.get("name") or "").lower(),
+        }
+        if username.lower() in names:
+            return member["id"]
+    return None
+
+
+async def ensure_public_channel(bot_token: str, channel_id: str, user_id: str) -> str:
+    """
+    If channel_id is a DM (starts with D), open a proper DM channel for the user.
+    Otherwise return channel_id unchanged.
+    """
+    if channel_id and not channel_id.startswith("D"):
+        return channel_id
+    # Slash command was run from a DM — fall back to DM-ing the organiser
+    result = await slack_api(bot_token, "conversations.open", {"users": user_id})
+    return result.get("channel", {}).get("id") or channel_id
 
 
 async def slack_api(bot_token: str, method: str, payload: dict) -> dict:
@@ -122,8 +164,8 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
         trigger_id  = form.get("trigger_id")
 
         print(f"DEBUG /meet user_id={user_id} team_id={team_id} channel_id={form.get('channel_id')} text={text!r}")
-        mentioned = extract_mentioned_user(text)
-        print(f"DEBUG extracted mentioned_user_id={mentioned!r}")
+        uid, uname = extract_mentioned_user(text)
+        print(f"DEBUG extracted uid={uid!r} uname={uname!r}")
 
         if not user_id or not response_url:
             return JSONResponse({"response_type": "ephemeral", "text": "Missing required fields."})
@@ -157,7 +199,9 @@ async def handle_meet(
             return
 
         # Who is being @mentioned?
-        mentioned_user_id = extract_mentioned_user(text)
+        uid, uname = extract_mentioned_user(text)
+        mentioned_user_id = await resolve_user_id(bot_token, uid, uname)
+        print(f"DEBUG mention uid={uid!r} uname={uname!r} resolved={mentioned_user_id!r}")
         text_lower = text.lower()
 
         db = SessionLocal()
@@ -398,9 +442,11 @@ async def handle_instant_meet(
         db.commit()
 
         organiser_name = await get_user_name(bot_token, user_id)
+        # If run from a DM, post to the organiser's DM channel instead
+        post_channel = await ensure_public_channel(bot_token, channel_id, user_id)
         cancel_val = json.dumps({
             "event_id": event_id, "user_id": user_id, "team_id": team_id,
-            "title": "Instant Meeting", "channel_id": channel_id, "meet_link": meet_link
+            "title": "Instant Meeting", "channel_id": post_channel, "meet_link": meet_link
         })
         cancel_btn = [{
             "type": "button", "style": "danger",
@@ -416,7 +462,7 @@ async def handle_instant_meet(
                      + f"👉 *Join here:* {meet_link}"}},
             {"type": "actions", "elements": cancel_btn}
         ]
-        await post_message(bot_token, channel_id,
+        await post_message(bot_token, post_channel,
                            text=f"Meeting started by {organiser_name}: {meet_link}",
                            blocks=channel_blocks)
 
@@ -481,9 +527,10 @@ async def handle_scheduled_meet(
         db.commit()
 
         organiser_name = await get_user_name(bot_token, user_id)
+        post_channel = await ensure_public_channel(bot_token, channel_id, user_id)
         cancel_val = json.dumps({
             "event_id": event_id, "user_id": user_id, "team_id": team_id,
-            "title": title, "channel_id": channel_id, "meet_link": meet_link
+            "title": title, "channel_id": post_channel, "meet_link": meet_link
         })
         cancel_btn = [{
             "type": "button", "style": "danger",
@@ -506,7 +553,7 @@ async def handle_scheduled_meet(
                      + summary}},
             {"type": "actions", "elements": cancel_btn}
         ]
-        await post_message(bot_token, channel_id,
+        await post_message(bot_token, post_channel,
                            text=f"Meeting scheduled by {organiser_name}: {meet_link}",
                            blocks=channel_blocks)
 
