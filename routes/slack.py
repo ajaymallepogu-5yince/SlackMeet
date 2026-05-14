@@ -84,6 +84,14 @@ async def get_user_name(bot_token: str, user_id: str) -> str:
     return profile.get("display_name") or result["user"].get("real_name") or f"<@{user_id}>"
 
 
+async def get_slack_email(bot_token: str, user_id: str) -> str | None:
+    """Get the email address Slack has on file for a user (requires users:read.email scope)."""
+    result = await slack_api(bot_token, "users.info", {"user": user_id})
+    if not result.get("ok"):
+        return None
+    return result.get("user", {}).get("profile", {}).get("email")
+
+
 def extract_mention(text: str) -> tuple[str | None, str | None]:
     """
     Returns (user_id, raw_username).
@@ -201,7 +209,7 @@ async def handle_meet(
         if any(w in text_lower for w in ["connect", "now", "instant"]):
             await respond(response_url, {
                 "replace_original": True, "response_type": "ephemeral",
-                "text": "⏳ Creating your meeting link..."
+                "text": "⏳ On it! Check your DMs for the meeting link."
             })
             await handle_instant_meet(user_id, team_id, channel_id, mentioned_user_id, bot_token)
             return
@@ -336,7 +344,7 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
             if action_id == "choice_instant":
                 await respond(response_url, {
                     "replace_original": True, "response_type": "ephemeral",
-                    "text": "⏳ Creating your meeting link..."
+                    "text": "⏳ On it! Check your DMs for the meeting link."
                 })
                 background_tasks.add_task(
                     handle_instant_meet, user_id, team_id_val, channel_id, mentioned_uid, bot_token
@@ -385,7 +393,14 @@ async def handle_instant_meet(
                           f"⚠️ Connect Google first: {BASE_URL}/auth?user_id={user_id}&team_id={team_id}")
             return
 
-        meet_link, cal_event_id = create_meeting(organiser)
+        # Fetch invitee's email so they get a proper Google Calendar invite
+        attendee_emails = []
+        if mentioned_user_id and mentioned_user_id != user_id:
+            invitee_email = await get_slack_email(bot_token, mentioned_user_id)
+            if invitee_email:
+                attendee_emails.append(invitee_email)
+
+        meet_link, cal_event_id = create_meeting(organiser, attendee_emails=attendee_emails)
         if not meet_link:
             await post_dm(bot_token, user_id, "❌ Failed to create meeting. Check Google Calendar access.")
             return
@@ -409,7 +424,7 @@ async def handle_instant_meet(
             "action_id": "cancel_meeting", "value": cancel_val
         }]
 
-        # DM the invited person
+        # DM the invited person in THEIR OWN DM (not the organiser's channel)
         if mentioned_user_id and mentioned_user_id != user_id:
             await post_dm(bot_token, mentioned_user_id,
                 text=f"📞 {organiser_name} invited you to a meeting: {meet_link}",
@@ -418,11 +433,12 @@ async def handle_instant_meet(
                      "text": f"👋 *<@{user_id}> invited you to a meeting!*\n"
                              f"📞 *Join here:* {meet_link}"}},
                     {"type": "context", "elements": [
-                        {"type": "mrkdwn", "text": "Click the link above to join instantly."}
+                        {"type": "mrkdwn", "text": "Click the link above to join instantly."
+                         + (f" A calendar invite has been sent to {invitee_email}." if attendee_emails else "")}
                     ]}
                 ])
 
-        # DM organiser — private confirmation + cancel
+        # DM organiser directly — confirmation + cancel button
         await post_dm(bot_token, user_id,
             text=f"✅ Your meeting is live: {meet_link}",
             blocks=[
@@ -454,7 +470,15 @@ async def handle_scheduled_meet(
                           f"⚠️ Connect Google first: {BASE_URL}/auth?user_id={user_id}&team_id={team_id}")
             return
 
-        meet_link, cal_event_id = create_scheduled_meeting(organiser, title, date, time, duration, notes)
+        # Fetch invitee's email so they get a proper Google Calendar invite
+        attendee_emails = []
+        invitee_email = None
+        if mentioned_user_id and mentioned_user_id != user_id:
+            invitee_email = await get_slack_email(bot_token, mentioned_user_id)
+            if invitee_email:
+                attendee_emails.append(invitee_email)
+
+        meet_link, cal_event_id = create_scheduled_meeting(organiser, title, date, time, duration, notes, attendee_emails=attendee_emails)
         if not meet_link:
             await post_dm(bot_token, user_id, "❌ Failed to schedule meeting.")
             return
@@ -485,7 +509,7 @@ async def handle_scheduled_meet(
             + (f"\n📝 _{notes}_" if notes else "")
         )
 
-        # DM the invited person
+        # DM the invited person in THEIR OWN DM
         if mentioned_user_id and mentioned_user_id != user_id:
             await post_dm(bot_token, mentioned_user_id,
                 text=f"📅 {organiser_name} scheduled a meeting with you: {meet_link}",
@@ -493,7 +517,8 @@ async def handle_scheduled_meet(
                     {"type": "section", "text": {"type": "mrkdwn",
                      "text": f"👋 *<@{user_id}> scheduled a meeting with you!*\n{summary}"}},
                     {"type": "context", "elements": [
-                        {"type": "mrkdwn", "text": "Click the link above to join at the scheduled time."}
+                        {"type": "mrkdwn", "text": "Click the link above to join at the scheduled time."
+                         + (f" A calendar invite has been sent to {invitee_email}." if invitee_email else "")}
                     ]}
                 ])
 

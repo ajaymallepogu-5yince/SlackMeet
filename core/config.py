@@ -13,8 +13,9 @@ BASE_URL = os.getenv("BASE_URL", "https://slackmeet-production.up.railway.app")
 GOOGLE_SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 SLACK_SCOPES = [
-    "commands",       # slash commands
-    "chat:write",     # post messages to channels
-    "im:write",       # open DMs
-    "users:read",     # resolve user names
+    "commands",           # slash commands
+    "chat:write",         # post messages to channels
+    "im:write",           # open DMs
+    "users:read",         # resolve user names
+    "users:read.email",   # get user emails for Google Calendar invites
 ]

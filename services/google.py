@@ -21,7 +21,7 @@ def _get_service(user: UserToken):
     return build("calendar", "v3", credentials=credentials)
 
 
-def create_meeting(user: UserToken) -> tuple[str, str] | tuple[None, None]:
+def create_meeting(user: UserToken, attendee_emails: list[str] = None) -> tuple[str, str] | tuple[None, None]:
     """Create an instant meeting. Returns (meet_link, calendar_event_id)."""
     if not user:
         return None, None
@@ -41,10 +41,14 @@ def create_meeting(user: UserToken) -> tuple[str, str] | tuple[None, None]:
         },
     }
 
+    if attendee_emails:
+        event["attendees"] = [{"email": e} for e in attendee_emails]
+
     result = service.events().insert(
         calendarId="primary",
         body=event,
         conferenceDataVersion=1,
+        sendUpdates="all",   # sends calendar invite emails to attendees
     ).execute()
 
     return result.get("hangoutLink"), result.get("id")
@@ -57,6 +61,7 @@ def create_scheduled_meeting(
     time: str,
     duration: int,
     notes: str = "",
+    attendee_emails: list[str] = None,
 ) -> tuple[str, str] | tuple[None, None]:
     """Create a scheduled meeting. Returns (meet_link, calendar_event_id)."""
     if not user:
@@ -79,10 +84,14 @@ def create_scheduled_meeting(
         },
     }
 
+    if attendee_emails:
+        event["attendees"] = [{"email": e} for e in attendee_emails]
+
     result = service.events().insert(
         calendarId="primary",
         body=event,
         conferenceDataVersion=1,
+        sendUpdates="all",   # sends calendar invite emails to attendees
     ).execute()
 
     return result.get("hangoutLink"), result.get("id")
