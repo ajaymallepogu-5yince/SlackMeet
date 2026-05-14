@@ -95,7 +95,9 @@ async def handle_meet_background(
     )
 
     try:
+        print("DEBUG handle_meet_background start user_id=" + user_id)
         bot_token = get_token(team_id)
+        print("DEBUG bot_token found=" + str(bool(bot_token)))
 
         if not bot_token:
             await slack_respond(response_url, {
@@ -108,6 +110,7 @@ async def handle_meet_background(
         db = SessionLocal()
         try:
             user = get_db_user(db, user_id)
+            print("DEBUG user found=" + str(bool(user)))
         finally:
             db.close()
 
