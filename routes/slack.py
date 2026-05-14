@@ -166,27 +166,29 @@ async def handle_meet_background(
 
 
 def _choice_blocks(user_id: str, team_id: str, session_id: str) -> list:
-    now_val = json.dumps({"action": "instant", "user_id": user_id, "team_id": team_id, "sid": session_id})
-    sched_val = json.dumps({"action": "schedule", "user_id": user_id, "team_id": team_id, "sid": session_id})
+    # Keep value short — Slack has a 2000 char limit and rejects complex JSON values
+    # in response_url payloads. Store only what we need.
+    now_val = "instant|" + user_id + "|" + team_id + "|" + session_id
+    sched_val = "schedule|" + user_id + "|" + team_id + "|" + session_id
     return [
         {
             "type": "section",
-            "text": {"type": "mrkdwn", "text": "*What would you like to do?* (pick one)"}
+            "text": {"type": "mrkdwn", "text": "*What would you like to do?*"}
         },
         {
             "type": "actions",
             "elements": [
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "Connect Now"},
-                    "action_id": "choice_button",
+                    "text": {"type": "plain_text", "text": "Connect Now", "emoji": False},
+                    "action_id": "choice_instant",
                     "value": now_val,
                     "style": "primary"
                 },
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "Schedule Later"},
-                    "action_id": "choice_button",
+                    "text": {"type": "plain_text", "text": "Schedule Later", "emoji": False},
+                    "action_id": "choice_schedule",
                     "value": sched_val,
                 }
             ]
@@ -253,11 +255,12 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
         action = actions_list[0]
         action_id = action.get("action_id")
 
-        if action_id == "choice_button":
-            ctx = json.loads(action.get("value", "{}"))
-            sid = ctx.get("sid")
-            user_id = ctx.get("user_id")
-            chosen = ctx.get("action")
+        if action_id in ("choice_instant", "choice_schedule"):
+            val = action.get("value", "")
+            parts = val.split("|")
+            if len(parts) != 4:
+                return JSONResponse({})
+            chosen, user_id, team_id_val, sid = parts
 
             if sid in _used_sessions:
                 await slack_respond(response_url, {
@@ -269,21 +272,21 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
 
             _used_sessions.add(sid)
 
-            if chosen == "instant":
+            if action_id == "choice_instant":
                 await slack_respond(response_url, {
                     "replace_original": True,
                     "response_type": "ephemeral",
                     "text": "Creating your meeting link..."
                 })
-                background_tasks.add_task(handle_instant_meet, user_id, team_id, response_url)
+                background_tasks.add_task(handle_instant_meet, user_id, team_id_val, response_url)
 
-            elif chosen == "schedule":
+            else:
                 await slack_respond(response_url, {
                     "replace_original": True,
                     "response_type": "ephemeral",
                     "text": "Opening scheduler..."
                 })
-                background_tasks.add_task(open_schedule_modal, trigger_id, user_id, team_id, bot_token)
+                background_tasks.add_task(open_schedule_modal, trigger_id, user_id, team_id_val, bot_token)
 
             return JSONResponse({})
 
