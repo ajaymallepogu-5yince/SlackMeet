@@ -6,7 +6,7 @@ from fastapi import APIRouter, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from core.config import BASE_URL
+from core.config import BASE_URL, SLACK_BOT_TOKEN as FALLBACK_BOT_TOKEN
 from core.database import SessionLocal
 from models.user_token import UserToken, WorkspaceInstall, MeetingRecord
 from services.google import create_meeting, create_scheduled_meeting, cancel_calendar_event
@@ -23,11 +23,13 @@ def get_db_user(db: Session, user_id: str):
 
 
 def get_token(team_id: str) -> str | None:
-    """Look up the bot token for a workspace from the DB."""
+    """Look up bot token from DB, fall back to SLACK_BOT_TOKEN env var."""
     db = SessionLocal()
     try:
         install = db.query(WorkspaceInstall).filter(WorkspaceInstall.team_id == team_id).first()
-        return install.bot_token if install else None
+        if install and install.bot_token:
+            return install.bot_token
+        return FALLBACK_BOT_TOKEN  # fallback for dev / before OAuth install
     finally:
         db.close()
 
