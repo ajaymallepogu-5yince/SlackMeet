@@ -103,7 +103,6 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
             session_id = str(uuid.uuid4())
             return JSONResponse({
                 "response_type": "ephemeral",
-                "text": "👋 What would you like to do?",
                 "blocks": _choice_blocks(user_id, team_id, session_id),
             })
         finally:
@@ -117,7 +116,6 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
 def _need_google(auth_url: str):
     return JSONResponse({
         "response_type": "ephemeral",
-        "text": "👋 Connect Google to use MeetNow",
         "blocks": [
             {"type": "section", "text": {"type": "mrkdwn", "text": "👋 *Connect Google to use MeetNow*"}},
             {"type": "actions", "elements": [{
