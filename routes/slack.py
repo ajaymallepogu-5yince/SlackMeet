@@ -121,7 +121,9 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
         response_url = form.get("response_url")
         trigger_id  = form.get("trigger_id")
 
-        print(f"DEBUG /meet user_id={user_id} team_id={team_id} text={text!r}")
+        print(f"DEBUG /meet user_id={user_id} team_id={team_id} channel_id={form.get('channel_id')} text={text!r}")
+        mentioned = extract_mentioned_user(text)
+        print(f"DEBUG extracted mentioned_user_id={mentioned!r}")
 
         if not user_id or not response_url:
             return JSONResponse({"response_type": "ephemeral", "text": "Missing required fields."})
