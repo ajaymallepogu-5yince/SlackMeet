@@ -21,8 +21,8 @@ def _get_service(user: UserToken):
     return build("calendar", "v3", credentials=credentials)
 
 
-def create_meeting(user: UserToken) -> tuple[str, str] | tuple[None, None]:
-    """Create an instant meeting. Returns (meet_link, calendar_event_id)."""
+def create_meeting(user: UserToken, user_tz: str = "UTC") -> tuple[str, str] | tuple[None, None]:
+    """Create an instant meeting in the user's local timezone. Returns (meet_link, calendar_event_id)."""
     if not user:
         return None, None
 
@@ -31,8 +31,8 @@ def create_meeting(user: UserToken) -> tuple[str, str] | tuple[None, None]:
 
     event = {
         "summary": "Instant Slack Meeting",
-        "start": {"dateTime": now.isoformat() + "Z"},
-        "end": {"dateTime": (now + timedelta(hours=1)).isoformat() + "Z"},
+        "start": {"dateTime": now.isoformat() + "Z", "timeZone": user_tz},
+        "end": {"dateTime": (now + timedelta(hours=1)).isoformat() + "Z", "timeZone": user_tz},
         "conferenceData": {
             "createRequest": {
                 "requestId": str(uuid.uuid4()),

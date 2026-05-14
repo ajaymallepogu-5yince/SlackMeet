@@ -5,6 +5,7 @@ import httpx
 from fastapi import APIRouter, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
+from datetime import datetime, timezone
 
 from core.config import BASE_URL, SLACK_BOT_TOKEN as FALLBACK_BOT_TOKEN
 from core.database import SessionLocal
@@ -40,18 +41,56 @@ async def slack_post(bot_token: str, channel: str, text: str = None, blocks: lis
     if blocks:
         payload["blocks"] = blocks
     async with httpx.AsyncClient() as client:
-        await client.post(
+        resp = await client.post(
             "https://slack.com/api/chat.postMessage",
-            headers={"Authorization": f"Bearer {bot_token}"},
+            headers={"Authorization": "Bearer " + bot_token},
             json=payload,
             timeout=10,
         )
+        data = resp.json()
+        if not data.get("ok"):
+            print("🔥 slack_post error:", data.get("error"))
+        return data
+
+
+async def slack_update(bot_token: str, channel: str, ts: str, text: str, blocks: list = None):
+    """Edit an existing message in place."""
+    payload = {"channel": channel, "ts": ts, "text": text}
+    if blocks:
+        payload["blocks"] = blocks
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "https://slack.com/api/chat.update",
+            headers={"Authorization": "Bearer " + bot_token},
+            json=payload,
+            timeout=10,
+        )
+        data = resp.json()
+        if not data.get("ok"):
+            print("🔥 slack_update error:", data.get("error"))
+        return data
 
 
 async def slack_respond(response_url: str, payload: dict):
     async with httpx.AsyncClient() as client:
         resp = await client.post(response_url, json=payload, timeout=10)
-        print("DEBUG slack_respond status=" + str(resp.status_code) + " body=" + resp.text[:200])
+        if resp.status_code != 200 or resp.text.strip() != "ok":
+            print("🔥 slack_respond status=" + str(resp.status_code) + " body=" + resp.text[:300])
+
+
+async def get_slack_user_tz(bot_token: str, user_id: str) -> str:
+    """Returns IANA timezone string e.g. 'America/New_York', fallback UTC."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            "https://slack.com/api/users.info",
+            headers={"Authorization": "Bearer " + bot_token},
+            params={"user": user_id},
+            timeout=10,
+        )
+        data = resp.json()
+        if data.get("ok"):
+            return data["user"].get("tz", "UTC")
+        return "UTC"
 
 
 # ─────────────────────────────────────────────
@@ -60,8 +99,7 @@ async def slack_respond(response_url: str, payload: dict):
 
 @router.post("/meet")
 async def meet(request: Request, background_tasks: BackgroundTasks):
-    # Slack requires a response within 3 seconds.
-    # Ack immediately, do all DB/Google work in background via response_url.
+    # Ack Slack immediately (must respond within 3s), do all work in background.
     try:
         form = await request.form()
         user_id = form.get("user_id")
@@ -70,7 +108,7 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
         response_url = form.get("response_url")
         trigger_id = form.get("trigger_id")
 
-        print(f"DEBUG /meet user_id={user_id} team_id={team_id} text={text!r}")
+        print("DEBUG /meet user_id=" + str(user_id) + " team_id=" + str(team_id) + " text=" + repr(text))
 
         if not user_id or not response_url:
             return JSONResponse({"response_type": "ephemeral", "text": "Missing required fields."})
@@ -88,12 +126,8 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
 async def handle_meet_background(
     user_id: str, team_id: str, text: str, response_url: str, trigger_id: str
 ):
-    """All DB and logic runs here, after Slack has already been acked."""
     google_auth_url = BASE_URL + "/auth?user_id=" + user_id + "&team_id=" + team_id
-    need_google_msg = (
-        "Connect Google to use MeetNow: "
-        "<" + google_auth_url + "|Click here to connect your Google account>"
-    )
+    need_google_msg = "👋 *Connect Google to use MeetNow*\n<" + google_auth_url + "|Click here to connect your Google account>"
 
     try:
         print("DEBUG handle_meet_background start user_id=" + user_id)
@@ -111,89 +145,55 @@ async def handle_meet_background(
         db = SessionLocal()
         try:
             user = get_db_user(db, user_id)
-            print("DEBUG user found=" + str(bool(user)))
         finally:
             db.close()
 
+        print("DEBUG user found=" + str(bool(user)))
+
         if any(w in text for w in ["connect", "now", "instant"]):
             if not user:
-                await slack_respond(response_url, {
-                    "replace_original": True,
-                    "response_type": "ephemeral",
-                    "text": need_google_msg,
-                })
+                await slack_respond(response_url, {"replace_original": True, "response_type": "ephemeral", "text": need_google_msg})
                 return
-            await handle_instant_meet(user_id, team_id, response_url)
+            await slack_respond(response_url, {"replace_original": True, "response_type": "ephemeral", "text": "⚡ Creating your meeting link..."})
+            await handle_instant_meet(user_id, team_id, response_url, bot_token)
             return
 
         if any(w in text for w in ["schedule", "later", "plan"]):
             if not user:
-                await slack_respond(response_url, {
-                    "replace_original": True,
-                    "response_type": "ephemeral",
-                    "text": need_google_msg,
-                })
+                await slack_respond(response_url, {"replace_original": True, "response_type": "ephemeral", "text": need_google_msg})
                 return
             await open_schedule_modal(trigger_id, user_id, team_id, bot_token)
             return
 
         if not user:
-            await slack_respond(response_url, {
-                "replace_original": True,
-                "response_type": "ephemeral",
-                "text": need_google_msg,
-            })
+            await slack_respond(response_url, {"replace_original": True, "response_type": "ephemeral", "text": need_google_msg})
             return
 
+        # Show instant/schedule choice buttons
         session_id = str(uuid.uuid4())
+        now_val = "instant|" + user_id + "|" + team_id + "|" + session_id
+        sched_val = "schedule|" + user_id + "|" + team_id + "|" + session_id
         await slack_respond(response_url, {
             "replace_original": True,
             "response_type": "ephemeral",
             "text": "What would you like to do?",
-            "blocks": _choice_blocks(user_id, team_id, session_id),
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": "👋 *What would you like to do?*"}},
+                {"type": "actions", "elements": [
+                    {"type": "button", "text": {"type": "plain_text", "text": "⚡ Meet Now", "emoji": True},
+                     "action_id": "choice_instant", "value": now_val, "style": "primary"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "📅 Schedule Later", "emoji": True},
+                     "action_id": "choice_schedule", "value": sched_val},
+                ]}
+            ],
         })
 
     except Exception as e:
         print("🔥 handle_meet_background ERROR:", str(e))
         try:
-            await slack_respond(response_url, {
-                "replace_original": True,
-                "response_type": "ephemeral",
-                "text": "Something went wrong. Please try again.",
-            })
+            await slack_respond(response_url, {"replace_original": True, "response_type": "ephemeral", "text": "Something went wrong. Please try again."})
         except Exception:
             pass
-
-
-def _choice_blocks(user_id: str, team_id: str, session_id: str) -> list:
-    # Keep value short — Slack has a 2000 char limit and rejects complex JSON values
-    # in response_url payloads. Store only what we need.
-    now_val = "instant|" + user_id + "|" + team_id + "|" + session_id
-    sched_val = "schedule|" + user_id + "|" + team_id + "|" + session_id
-    return [
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": "*What would you like to do?*"}
-        },
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Connect Now", "emoji": False},
-                    "action_id": "choice_instant",
-                    "value": now_val,
-                    "style": "primary"
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Schedule Later", "emoji": False},
-                    "action_id": "choice_schedule",
-                    "value": sched_val,
-                }
-            ]
-        }
-    ]
 
 
 # ─────────────────────────────────────────────
@@ -210,6 +210,7 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
         payload = json.loads(form.get("payload", "{}"))
         payload_type = payload.get("type")
 
+        # ── Modal submitted ──────────────────────────────
         if payload_type == "view_submission":
             view = payload.get("view", {})
             cb = view.get("callback_id", "")
@@ -239,15 +240,19 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
                 background_tasks.add_task(
                     handle_cancel_meeting,
                     meta["user_id"], meta["team_id"],
-                    meta["event_id"], meta["slack_user_id"]
+                    meta["event_id"], meta["slack_user_id"],
+                    meta.get("channel_id", ""), meta.get("message_ts", "")
                 )
                 return JSONResponse({})
 
+        # ── Button clicked ───────────────────────────────
         actions_list = payload.get("actions", [])
         response_url = payload.get("response_url")
         trigger_id = payload.get("trigger_id")
         team_id = payload.get("team", {}).get("id")
         bot_token = get_token(team_id)
+        channel_id = payload.get("channel", {}).get("id", "")
+        message_ts = payload.get("message", {}).get("ts", "")
 
         if not actions_list:
             return JSONResponse({})
@@ -255,6 +260,7 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
         action = actions_list[0]
         action_id = action.get("action_id")
 
+        # ── Meet Now / Schedule Later choice ─────────────
         if action_id in ("choice_instant", "choice_schedule"):
             val = action.get("value", "")
             parts = val.split("|")
@@ -264,8 +270,7 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
 
             if sid in _used_sessions:
                 await slack_respond(response_url, {
-                    "replace_original": True,
-                    "response_type": "ephemeral",
+                    "replace_original": True, "response_type": "ephemeral",
                     "text": "You already used this. Type /meet again to get fresh options."
                 })
                 return JSONResponse({})
@@ -273,30 +278,26 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
             _used_sessions.add(sid)
 
             if action_id == "choice_instant":
-                await slack_respond(response_url, {
-                    "replace_original": True,
-                    "response_type": "ephemeral",
-                    "text": "Creating your meeting link..."
-                })
-                background_tasks.add_task(handle_instant_meet, user_id, team_id_val, response_url)
-
+                await slack_respond(response_url, {"replace_original": True, "response_type": "ephemeral", "text": "⚡ Creating your meeting link..."})
+                background_tasks.add_task(handle_instant_meet, user_id, team_id_val, response_url, bot_token)
             else:
-                await slack_respond(response_url, {
-                    "replace_original": True,
-                    "response_type": "ephemeral",
-                    "text": "Opening scheduler..."
-                })
+                await slack_respond(response_url, {"replace_original": True, "response_type": "ephemeral", "text": "📅 Opening scheduler..."})
                 background_tasks.add_task(open_schedule_modal, trigger_id, user_id, team_id_val, bot_token)
 
             return JSONResponse({})
 
+        # ── Cancel meeting button ────────────────────────
         if action_id == "cancel_meeting":
-            ctx = json.loads(action.get("value", "{}"))
+            val = action.get("value", "")
+            parts = val.split("|", 3)  # split max 3 times so title can contain pipes
+            if len(parts) != 4:
+                return JSONResponse({})
+            event_id, user_id, team_id_val, title = parts
             slack_user_id = payload.get("user", {}).get("id")
             background_tasks.add_task(
-                open_cancel_modal,
-                trigger_id, ctx["event_id"], ctx["user_id"],
-                ctx["team_id"], ctx["title"], slack_user_id, bot_token
+                handle_cancel_meeting,
+                user_id, team_id_val, event_id, slack_user_id,
+                channel_id, message_ts
             )
             return JSONResponse({})
 
@@ -311,57 +312,57 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
 # Background tasks
 # ─────────────────────────────────────────────
 
-async def handle_instant_meet(user_id: str, team_id: str, response_url: str):
+async def handle_instant_meet(user_id: str, team_id: str, response_url: str, bot_token: str):
     db = SessionLocal()
     try:
         user = get_db_user(db, user_id)
         if not user:
             await slack_respond(response_url, {
-                "replace_original": True,
-                "response_type": "ephemeral",
+                "replace_original": True, "response_type": "ephemeral",
                 "text": "Connect Google first: " + BASE_URL + "/auth?user_id=" + user_id + "&team_id=" + team_id
             })
             return
 
-        meet_link, cal_event_id = create_meeting(user)
+        # Get user's timezone so the Google event uses their local time
+        user_tz = await get_slack_user_tz(bot_token, user_id)
+        meet_link, cal_event_id = create_meeting(user, user_tz)
         if not meet_link:
             await slack_respond(response_url, {
-                "replace_original": True,
-                "response_type": "ephemeral",
-                "text": "Failed to create meeting. Check Google Calendar access."
+                "replace_original": True, "response_type": "ephemeral",
+                "text": "Failed to create meeting. Check your Google Calendar access."
             })
             return
 
         event_id = str(uuid.uuid4())
+        # Friendly local time label
+        now_label = datetime.now(timezone.utc).strftime("%b %d, %Y at %I:%M %p UTC")
+
         record = MeetingRecord(
-            event_id=event_id,
-            user_id=user_id,
-            team_id=team_id,
-            title="Instant Slack Meeting",
-            meet_link=meet_link,
-            start_time="now",
-            calendar_event_id=cal_event_id,
+            event_id=event_id, user_id=user_id, team_id=team_id,
+            title="Instant Meeting", meet_link=meet_link,
+            start_time=now_label, calendar_event_id=cal_event_id,
         )
         db.add(record)
         db.commit()
 
-        cancel_val = json.dumps({
-            "event_id": event_id, "user_id": user_id,
-            "team_id": team_id, "title": "Instant Slack Meeting"
-        })
+        # Cancel button value: pipe-delimited to avoid JSON block issues
+        cancel_val = event_id + "|" + user_id + "|" + team_id + "|Instant Meeting"
+
         await slack_respond(response_url, {
             "replace_original": True,
             "response_type": "in_channel",
             "text": "Meeting ready! " + meet_link,
             "blocks": [
-                {"type": "section", "text": {"type": "mrkdwn", "text": "*Meeting ready!*\n" + meet_link}},
-                {"type": "actions", "elements": [{
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Cancel Meeting"},
-                    "action_id": "cancel_meeting",
-                    "value": cancel_val,
-                    "style": "danger"
-                }]}
+                {"type": "section", "text": {"type": "mrkdwn", "text": (
+                    "🚀 *Your meeting is ready!*\n\n"
+                    "📅 *" + now_label + "*\n"
+                    "🔗 *Join:* " + meet_link
+                )}},
+                {"type": "divider"},
+                {"type": "actions", "elements": [
+                    {"type": "button", "text": {"type": "plain_text", "text": "🗑 Cancel Meeting", "emoji": True},
+                     "action_id": "cancel_meeting", "value": cancel_val, "style": "danger"}
+                ]}
             ]
         })
     except Exception as e:
@@ -385,45 +386,60 @@ async def handle_scheduled_meet(
 
         meet_link, cal_event_id = create_scheduled_meeting(user, title, date, time, duration, notes)
         if not meet_link:
-            await slack_post(bot_token, slack_user_id, text="Failed to schedule meeting.")
+            await slack_post(bot_token, slack_user_id, text="Failed to schedule meeting. Please try again.")
             return
 
         event_id = str(uuid.uuid4())
         record = MeetingRecord(
-            event_id=event_id,
-            user_id=user_id,
-            team_id=team_id,
-            title=title,
-            meet_link=meet_link,
-            start_time=date + " " + time,
-            calendar_event_id=cal_event_id,
+            event_id=event_id, user_id=user_id, team_id=team_id,
+            title=title, meet_link=meet_link,
+            start_time=date + " " + time, calendar_event_id=cal_event_id,
         )
         db.add(record)
         db.commit()
 
-        cancel_val = json.dumps({
-            "event_id": event_id, "user_id": user_id,
-            "team_id": team_id, "title": title
-        })
-        body_text = title + " scheduled!\n" + date + " at " + time + " (" + str(duration) + " min)\n" + meet_link
-        if notes:
-            body_text += "\n" + notes
-        await slack_post(bot_token, slack_user_id, text=body_text, blocks=[
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": body_text}
-            },
-            {
-                "type": "actions",
-                "elements": [{
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Cancel Meeting"},
-                    "action_id": "cancel_meeting",
-                    "value": cancel_val,
-                    "style": "danger"
-                }]
-            }
-        ])
+        # Duration label
+        if duration < 60:
+            dur_label = str(duration) + " min"
+        elif duration == 60:
+            dur_label = "1 hour"
+        else:
+            dur_label = str(duration // 60) + "h " + (str(duration % 60) + "m" if duration % 60 else "")
+
+        # Format date nicely: 2025-05-14 → May 14, 2025
+        try:
+            dt = datetime.strptime(date, "%Y-%m-%d")
+            date_label = dt.strftime("%B %d, %Y")
+        except Exception:
+            date_label = date
+
+        # Format time nicely: 14:30 → 2:30 PM
+        try:
+            t = datetime.strptime(time, "%H:%M")
+            time_label = t.strftime("%I:%M %p").lstrip("0")
+        except Exception:
+            time_label = time
+
+        cancel_val = event_id + "|" + user_id + "|" + team_id + "|" + title
+
+        msg_text = "✅ *" + title + "* has been scheduled!"
+        blocks = [
+            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                "✅ *" + title + "* has been scheduled!\n\n"
+                "📅 *Date:* " + date_label + "\n"
+                "🕐 *Time:* " + time_label + "\n"
+                "⏱ *Duration:* " + dur_label + "\n"
+                "🔗 *Join:* " + meet_link +
+                ("\n📝 *Notes:* " + notes if notes else "")
+            )}},
+            {"type": "divider"},
+            {"type": "actions", "elements": [
+                {"type": "button", "text": {"type": "plain_text", "text": "🗑 Cancel Meeting", "emoji": True},
+                 "action_id": "cancel_meeting", "value": cancel_val, "style": "danger"}
+            ]}
+        ]
+        await slack_post(bot_token, slack_user_id, text=msg_text, blocks=blocks)
+
     except Exception as e:
         print("🔥 handle_scheduled_meet ERROR:", str(e))
         if bot_token:
@@ -479,7 +495,7 @@ async def open_schedule_modal(trigger_id: str, user_id: str, team_id: str, bot_t
                  "element": {
                      "type": "plain_text_input", "action_id": "notes_input",
                      "multiline": True,
-                     "placeholder": {"type": "plain_text", "text": "Agenda, topics..."},
+                     "placeholder": {"type": "plain_text", "text": "Agenda, topics, attendees..."},
                      "max_length": 500
                  }},
             ]
@@ -495,66 +511,39 @@ async def open_schedule_modal(trigger_id: str, user_id: str, team_id: str, bot_t
             print("🔥 Modal open failed:", resp.json())
 
 
-async def open_cancel_modal(
-    trigger_id: str, event_id: str, user_id: str,
-    team_id: str, title: str, slack_user_id: str, bot_token: str
+async def handle_cancel_meeting(
+    user_id: str, team_id: str, event_id: str, slack_user_id: str,
+    channel_id: str = "", message_ts: str = ""
 ):
-    meta = json.dumps({
-        "event_id": event_id, "user_id": user_id,
-        "team_id": team_id, "slack_user_id": slack_user_id
-    })
-    modal = {
-        "trigger_id": trigger_id,
-        "view": {
-            "type": "modal",
-            "callback_id": "cancel_confirm_modal",
-            "private_metadata": meta,
-            "title": {"type": "plain_text", "text": "Cancel Meeting"},
-            "submit": {"type": "plain_text", "text": "Yes, Cancel It"},
-            "close": {"type": "plain_text", "text": "Keep It"},
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": "Are you sure you want to cancel *" + title + "*?\n\nThis will delete it from your Google Calendar."
-                    }
-                }
-            ]
-        }
-    }
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            "https://slack.com/api/views.open",
-            headers={"Authorization": "Bearer " + bot_token, "Content-Type": "application/json"},
-            json=modal, timeout=10
-        )
-        if not resp.json().get("ok"):
-            print("🔥 Cancel modal failed:", resp.json())
-
-
-async def handle_cancel_meeting(user_id: str, team_id: str, event_id: str, slack_user_id: str):
     db = SessionLocal()
     bot_token = get_token(team_id)
     try:
         record = db.query(MeetingRecord).filter(MeetingRecord.event_id == event_id).first()
         if not record:
-            await slack_post(bot_token, slack_user_id,
-                             text="Meeting not found — it may have already been cancelled.")
+            await slack_post(bot_token, slack_user_id, text="Meeting not found — it may have already been cancelled.")
             return
 
+        title = record.title
         user = get_db_user(db, user_id)
         success = cancel_calendar_event(user, record.calendar_event_id) if user else False
 
         db.delete(record)
         db.commit()
 
-        if success:
-            await slack_post(bot_token, slack_user_id,
-                             text=record.title + " cancelled and removed from Google Calendar.")
+        # Edit the original message to remove the meeting link and button
+        if channel_id and message_ts and bot_token:
+            status = "✅ *" + title + "* has been cancelled and removed from Google Calendar." if success else "⚠️ *" + title + "* removed from MeetNow (could not delete from Google Calendar — check there manually)."
+            await slack_update(bot_token, channel_id, message_ts,
+                text=title + " cancelled.",
+                blocks=[
+                    {"type": "section", "text": {"type": "mrkdwn", "text": status}}
+                ]
+            )
         else:
-            await slack_post(bot_token, slack_user_id,
-                             text="Removed from MeetNow but could not delete from Google Calendar — please check there manually.")
+            # Fallback: just post a new message
+            msg = "✅ *" + title + "* cancelled and removed from Google Calendar." if success else "⚠️ Removed from MeetNow but could not delete from Google Calendar."
+            await slack_post(bot_token, slack_user_id, text=msg)
+
     except Exception as e:
         print("🔥 handle_cancel_meeting ERROR:", str(e))
         await slack_post(bot_token, slack_user_id, text="Something went wrong cancelling the meeting.")
