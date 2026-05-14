@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 from core.config import BASE_URL
 from core.database import SessionLocal
 from models.user_token import UserToken, WorkspaceInstall, MeetingRecord
-from routes.slack_install import get_bot_token
 from services.google import create_meeting, create_scheduled_meeting, cancel_calendar_event
 
 router = APIRouter()
@@ -24,7 +23,13 @@ def get_db_user(db: Session, user_id: str):
 
 
 def get_token(team_id: str) -> str | None:
-    return get_bot_token(team_id)
+    """Look up the bot token for a workspace from the DB."""
+    db = SessionLocal()
+    try:
+        install = db.query(WorkspaceInstall).filter(WorkspaceInstall.team_id == team_id).first()
+        return install.bot_token if install else None
+    finally:
+        db.close()
 
 
 async def slack_post(bot_token: str, channel: str, text: str = None, blocks: list = None):
@@ -78,7 +83,6 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
             user = get_db_user(db, user_id)
             google_auth_url = f"{BASE_URL}/auth?user_id={user_id}&team_id={team_id}"
 
-            # Direct keyword shortcuts — no buttons needed
             if any(w in text for w in ["connect", "now", "instant"]):
                 if not user:
                     return _need_google(google_auth_url)
@@ -91,7 +95,6 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
                 background_tasks.add_task(open_schedule_modal, trigger_id, user_id, team_id, bot_token)
                 return JSONResponse({"response_type": "ephemeral", "text": "📅 Opening scheduler..."})
 
-            # No keyword → show two buttons with a unique session_id to prevent double-use
             if not user:
                 return _need_google(google_auth_url)
 
@@ -124,7 +127,6 @@ def _need_google(auth_url: str):
 
 
 def _choice_blocks(user_id: str, team_id: str, session_id: str) -> list:
-    """Two-button block. value encodes all context needed by /actions."""
     now_val = json.dumps({"action": "instant", "user_id": user_id, "team_id": team_id, "sid": session_id})
     sched_val = json.dumps({"action": "schedule", "user_id": user_id, "team_id": team_id, "sid": session_id})
     return [
@@ -157,7 +159,6 @@ def _choice_blocks(user_id: str, team_id: str, session_id: str) -> list:
 # /actions  (button clicks + modal submissions)
 # ─────────────────────────────────────────────
 
-# Track used session_ids so each button set can only be used once
 _used_sessions: set[str] = set()
 
 
@@ -191,7 +192,7 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
                     user_id, team_id, slack_user_id,
                     title, date, time, duration, notes
                 )
-                return JSONResponse({})  # closes the modal
+                return JSONResponse({})
 
             if cb == "cancel_confirm_modal":
                 meta = json.loads(view.get("private_metadata", "{}"))
@@ -215,22 +216,17 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
         action = actions_list[0]
         action_id = action.get("action_id")
 
-        # ── Choice buttons (Connect Now / Schedule Later) ─
         if action_id == "choice_button":
             ctx = json.loads(action.get("value", "{}"))
             sid = ctx.get("sid")
             user_id = ctx.get("user_id")
             chosen = ctx.get("action")
 
-            # Single-use enforcement
             if sid in _used_sessions:
                 await slack_respond(response_url, {
                     "replace_original": True,
                     "response_type": "ephemeral",
-                    "text": (
-                        "⚠️ You already used this. "
-                        "Type `/meet @user` again to get a fresh set of options."
-                    )
+                    "text": "⚠️ You already used this. Type `/meet @user` again to get fresh options."
                 })
                 return JSONResponse({})
 
@@ -242,9 +238,7 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
                     "response_type": "ephemeral",
                     "text": "⏳ Creating your meeting link..."
                 })
-                background_tasks.add_task(
-                    handle_instant_meet, user_id, team_id, response_url
-                )
+                background_tasks.add_task(handle_instant_meet, user_id, team_id, response_url)
 
             elif chosen == "schedule":
                 await slack_respond(response_url, {
@@ -252,13 +246,10 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
                     "response_type": "ephemeral",
                     "text": "📅 Opening scheduler..."
                 })
-                background_tasks.add_task(
-                    open_schedule_modal, trigger_id, user_id, team_id, bot_token
-                )
+                background_tasks.add_task(open_schedule_modal, trigger_id, user_id, team_id, bot_token)
 
             return JSONResponse({})
 
-        # ── Cancel meeting button ─────────────────────────
         if action_id == "cancel_meeting":
             ctx = json.loads(action.get("value", "{}"))
             slack_user_id = payload.get("user", {}).get("id")
@@ -301,7 +292,6 @@ async def handle_instant_meet(user_id: str, team_id: str, response_url: str):
             })
             return
 
-        # Save record so user can cancel
         event_id = str(uuid.uuid4())
         record = MeetingRecord(
             event_id=event_id,
@@ -315,7 +305,10 @@ async def handle_instant_meet(user_id: str, team_id: str, response_url: str):
         db.add(record)
         db.commit()
 
-        cancel_val = json.dumps({"event_id": event_id, "user_id": user_id, "team_id": team_id, "title": "Instant Slack Meeting"})
+        cancel_val = json.dumps({
+            "event_id": event_id, "user_id": user_id,
+            "team_id": team_id, "title": "Instant Slack Meeting"
+        })
         await slack_respond(response_url, {
             "replace_original": True,
             "response_type": "in_channel",
@@ -345,7 +338,8 @@ async def handle_scheduled_meet(
     try:
         user = get_db_user(db, user_id)
         if not user:
-            await slack_post(bot_token, slack_user_id, text=f"⚠️ Connect Google first: {BASE_URL}/auth?user_id={user_id}&team_id={team_id}")
+            await slack_post(bot_token, slack_user_id,
+                             text=f"⚠️ Connect Google first: {BASE_URL}/auth?user_id={user_id}&team_id={team_id}")
             return
 
         meet_link, cal_event_id = create_scheduled_meeting(user, title, date, time, duration, notes)
@@ -366,7 +360,10 @@ async def handle_scheduled_meet(
         db.add(record)
         db.commit()
 
-        cancel_val = json.dumps({"event_id": event_id, "user_id": user_id, "team_id": team_id, "title": title})
+        cancel_val = json.dumps({
+            "event_id": event_id, "user_id": user_id,
+            "team_id": team_id, "title": title
+        })
         await slack_post(bot_token, slack_user_id, blocks=[
             {
                 "type": "section",
@@ -393,7 +390,8 @@ async def handle_scheduled_meet(
         ])
     except Exception as e:
         print("🔥 handle_scheduled_meet ERROR:", str(e))
-        await slack_post(bot_token, slack_user_id, text="❌ Something went wrong scheduling the meeting.")
+        if bot_token:
+            await slack_post(bot_token, slack_user_id, text="❌ Something went wrong scheduling the meeting.")
     finally:
         db.close()
 
@@ -457,16 +455,18 @@ async def open_schedule_modal(trigger_id: str, user_id: str, team_id: str, bot_t
             headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
             json=modal, timeout=10
         )
-        data = resp.json()
-        if not data.get("ok"):
-            print("🔥 Modal open failed:", data)
+        if not resp.json().get("ok"):
+            print("🔥 Modal open failed:", resp.json())
 
 
 async def open_cancel_modal(
     trigger_id: str, event_id: str, user_id: str,
     team_id: str, title: str, slack_user_id: str, bot_token: str
 ):
-    meta = json.dumps({"event_id": event_id, "user_id": user_id, "team_id": team_id, "slack_user_id": slack_user_id})
+    meta = json.dumps({
+        "event_id": event_id, "user_id": user_id,
+        "team_id": team_id, "slack_user_id": slack_user_id
+    })
     modal = {
         "trigger_id": trigger_id,
         "view": {
@@ -474,14 +474,14 @@ async def open_cancel_modal(
             "callback_id": "cancel_confirm_modal",
             "private_metadata": meta,
             "title": {"type": "plain_text", "text": "Cancel Meeting"},
-            "submit": {"type": "plain_text", "text": "Yes, Cancel It", "emoji": True},
+            "submit": {"type": "plain_text", "text": "Yes, Cancel It"},
             "close": {"type": "plain_text", "text": "Keep It"},
             "blocks": [
                 {
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"Are you sure you want to cancel *{title}*?\n\nThis will delete the event from your Google Calendar."
+                        "text": f"Are you sure you want to cancel *{title}*?\n\nThis will delete it from your Google Calendar."
                     }
                 }
             ]
@@ -493,9 +493,8 @@ async def open_cancel_modal(
             headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
             json=modal, timeout=10
         )
-        data = resp.json()
-        if not data.get("ok"):
-            print("🔥 Cancel modal failed:", data)
+        if not resp.json().get("ok"):
+            print("🔥 Cancel modal failed:", resp.json())
 
 
 async def handle_cancel_meeting(user_id: str, team_id: str, event_id: str, slack_user_id: str):
@@ -504,23 +503,22 @@ async def handle_cancel_meeting(user_id: str, team_id: str, event_id: str, slack
     try:
         record = db.query(MeetingRecord).filter(MeetingRecord.event_id == event_id).first()
         if not record:
-            await slack_post(bot_token, slack_user_id, text="⚠️ Meeting not found — it may have already been cancelled.")
+            await slack_post(bot_token, slack_user_id,
+                             text="⚠️ Meeting not found — it may have already been cancelled.")
             return
 
         user = get_db_user(db, user_id)
-        if not user:
-            await slack_post(bot_token, slack_user_id, text="⚠️ Google not connected.")
-            return
+        success = cancel_calendar_event(user, record.calendar_event_id) if user else False
 
-        success = cancel_calendar_event(user, record.calendar_event_id)
         db.delete(record)
         db.commit()
 
         if success:
-            await slack_post(bot_token, slack_user_id, text=f"✅ *{record.title}* has been cancelled and removed from Google Calendar.")
+            await slack_post(bot_token, slack_user_id,
+                             text=f"✅ *{record.title}* cancelled and removed from Google Calendar.")
         else:
-            await slack_post(bot_token, slack_user_id, text=f"⚠️ Removed from MeetNow but couldn't delete from Google Calendar — please check there manually.")
-
+            await slack_post(bot_token, slack_user_id,
+                             text=f"⚠️ Removed from MeetNow but couldn't delete from Google Calendar — please check there manually.")
     except Exception as e:
         print("🔥 handle_cancel_meeting ERROR:", str(e))
         await slack_post(bot_token, slack_user_id, text="❌ Something went wrong cancelling the meeting.")
