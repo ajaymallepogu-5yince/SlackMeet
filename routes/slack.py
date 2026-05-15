@@ -200,7 +200,7 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
         trigger_id   = form.get("trigger_id")
 
         uid, uname = extract_mention(text)
-        print(f"DEBUG /meet user={user_id} team={team_id} text={text!r} uid={uid!r} uname={uname!r}")
+        print(f"DEBUG /meet user={user_id} team={team_id} text={text!r} uid={uid!r} uname={uname!r} channel_id={channel_id!r}")
 
         if not user_id or not response_url:
             return JSONResponse({"response_type": "ephemeral", "text": "Missing required fields."})
@@ -259,16 +259,22 @@ async def handle_meet(
             return
 
         text_lower = text.lower()
-
-        if any(w in text_lower for w in ["connect", "now", "instant"]):
-            await handle_instant_meet(user_id, team_id, channel_id, invited_member, bot_token)
-            return
+        # Strip the @mention from text to see if there's anything extra
+        mention_stripped = re.sub(r"<@[A-Z0-9]+(?:\|[^>]*)?>", "", text).strip()
+        mention_stripped = re.sub(r"@[\w.]+", "", mention_stripped).strip()
+        has_extra_text = bool(mention_stripped)
 
         if any(w in text_lower for w in ["schedule", "later", "plan"]):
             await open_schedule_modal(trigger_id, user_id, team_id, channel_id, invited_user_id, bot_token)
             return
 
-        # No keyword → show two single-use buttons
+        # Any extra text after @mention (e.g. "lets connect", "now", "hi") = instant meet
+        # Also explicit instant keywords
+        if has_extra_text or any(w in text_lower for w in ["now", "instant", "connect"]):
+            await handle_instant_meet(user_id, team_id, channel_id, invited_member, bot_token)
+            return
+
+        # Just "/meet @user" alone → show choice buttons
         session_id = str(uuid.uuid4())
         encoded = f"{user_id}|{team_id}|{channel_id}|{invited_user_id or ''}|{session_id}"
         await respond(response_url, {
@@ -488,6 +494,7 @@ async def handle_instant_meet(
         }]
 
         # ✅ Post to the channel/DM where /meet was typed
+        print(f"DEBUG posting to channel_id={channel_id!r}")
         await post_to_channel(bot_token, channel_id,
             text=f"✅ Meeting live: {meet_link}",
             blocks=[
