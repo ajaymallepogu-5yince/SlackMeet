@@ -1,4 +1,3 @@
-
 import json
 import re
 import uuid
@@ -98,7 +97,7 @@ async def slack_api(
 
 
 # ─────────────────────────────────────────────────────────────────
-# Respond Back Into SAME Slack Conversation
+# Public Response
 # ─────────────────────────────────────────────────────────────────
 
 async def respond_in_channel(
@@ -106,16 +105,6 @@ async def respond_in_channel(
     text: str,
     blocks: list = None
 ):
-    """
-    Respond directly into SAME Slack conversation.
-
-    Works in:
-    - Native DMs
-    - Channels
-    - Private channels
-
-    WITHOUT creating extra groups.
-    """
 
     payload = {
         "response_type": "in_channel",
@@ -135,6 +124,38 @@ async def respond_in_channel(
 
     print(
         "DEBUG response_url:",
+        response.status_code
+    )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Private Response
+# ─────────────────────────────────────────────────────────────────
+
+async def respond_to_user(
+    response_url: str,
+    text: str,
+    blocks: list = None
+):
+
+    payload = {
+        "response_type": "ephemeral",
+        "text": text,
+    }
+
+    if blocks:
+        payload["blocks"] = blocks
+
+    async with httpx.AsyncClient() as client:
+
+        response = await client.post(
+            response_url,
+            json=payload,
+            timeout=20,
+        )
+
+    print(
+        "DEBUG ephemeral:",
         response.status_code
     )
 
@@ -301,19 +322,65 @@ async def meet(
             f"text={text}"
         )
 
-        background_tasks.add_task(
-            handle_instant_meet,
-            user_id,
-            team_id,
-            channel_id,
-            uid,
-            uname,
-            response_url,
-        )
-
         return JSONResponse({
+
             "response_type": "ephemeral",
-            "text": ""
+
+            "blocks": [
+
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"🤝 Meeting with "
+                            f"<@{uid}>"
+                        )
+                    }
+                },
+
+                {
+                    "type": "actions",
+
+                    "elements": [
+
+                        {
+                            "type": "button",
+
+                            "style": "primary",
+
+                            "text": {
+                                "type": "plain_text",
+                                "text": "⚡ Connect Now"
+                            },
+
+                            "action_id": "connect_now",
+
+                            "value": json.dumps({
+                                "user_id": user_id,
+                                "team_id": team_id,
+                                "channel_id": channel_id,
+                                "uid": uid,
+                                "uname": uname,
+                                "response_url": response_url,
+                            })
+                        },
+
+                        {
+                            "type": "button",
+
+                            "text": {
+                                "type": "plain_text",
+                                "text": "📅 Schedule Later"
+                            },
+
+                            "action_id": "schedule_later",
+
+                            "value": "todo"
+                        }
+                    ]
+                }
+            ]
         })
 
     except Exception as e:
@@ -327,6 +394,111 @@ async def meet(
             "response_type": "ephemeral",
             "text": "Something went wrong."
         })
+
+
+# ─────────────────────────────────────────────────────────────────
+# Actions Route
+# ─────────────────────────────────────────────────────────────────
+
+@router.post("/actions")
+async def actions(
+    request: Request,
+    background_tasks: BackgroundTasks
+):
+
+    try:
+
+        form = await request.form()
+
+        payload = json.loads(
+            form.get("payload", "{}")
+        )
+
+        actions_list = payload.get(
+            "actions",
+            []
+        )
+
+        if not actions_list:
+            return JSONResponse({})
+
+        action = actions_list[0]
+
+        action_id = action.get(
+            "action_id"
+        )
+
+        # ─────────────────────────────────────────────────────────
+        # Connect Now
+        # ─────────────────────────────────────────────────────────
+
+        if action_id == "connect_now":
+
+            value = json.loads(
+                action.get("value")
+            )
+
+            background_tasks.add_task(
+                handle_instant_meet,
+                value["user_id"],
+                value["team_id"],
+                value["channel_id"],
+                value["uid"],
+                value["uname"],
+                value["response_url"],
+            )
+
+            return JSONResponse({})
+
+        # ─────────────────────────────────────────────────────────
+        # Cancel Meeting
+        # ─────────────────────────────────────────────────────────
+
+        if action_id == "cancel_meeting":
+
+            value = json.loads(
+                action.get("value")
+            )
+
+            event_id = value.get(
+                "event_id"
+            )
+
+            db = SessionLocal()
+
+            try:
+
+                record = db.query(
+                    MeetingRecord
+                ).filter(
+                    MeetingRecord.event_id == event_id
+                ).first()
+
+                if record:
+
+                    db.delete(record)
+                    db.commit()
+
+            finally:
+                db.close()
+
+            return JSONResponse({
+
+                "replace_original": True,
+
+                "text": "❌ Meeting cancelled"
+            })
+
+        return JSONResponse({})
+
+    except Exception as e:
+
+        print(
+            "🔥 /actions ERROR:",
+            str(e)
+        )
+
+        return JSONResponse({})
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -371,21 +543,63 @@ async def handle_instant_meet(
             user_id
         )
 
+        # ─────────────────────────────────────────────────────────
+        # Google Not Connected
+        # ─────────────────────────────────────────────────────────
+
         if not organiser:
 
-            await respond_in_channel(
-                response_url,
-                (
-                    "⚠️ Please connect Google first:\n"
-                    f"{BASE_URL}/auth"
-                    f"?user_id={user_id}"
-                    f"&team_id={team_id}"
-                )
+            auth_url = (
+                f"{BASE_URL}/auth"
+                f"?user_id={user_id}"
+                f"&team_id={team_id}"
+            )
+
+            await respond_to_user(
+
+                response_url=response_url,
+
+                text="Google connection required",
+
+                blocks=[
+
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                "🔐 *Connect your Google account*\n\n"
+                                "MeetNow needs Google Calendar access "
+                                "to create meetings."
+                            )
+                        }
+                    },
+
+                    {
+                        "type": "actions",
+                        "elements": [
+
+                            {
+                                "type": "button",
+                                "style": "primary",
+
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "🔗 Connect Google"
+                                },
+
+                                "url": auth_url
+                            }
+                        ]
+                    }
+                ]
             )
 
             return
 
+        # ─────────────────────────────────────────────────────────
         # Create Google Meet
+        # ─────────────────────────────────────────────────────────
 
         meet_link, cal_event_id = create_meeting(
             organiser,
@@ -403,7 +617,9 @@ async def handle_instant_meet(
 
             return
 
-        # Save meeting
+        # ─────────────────────────────────────────────────────────
+        # Save Meeting
+        # ─────────────────────────────────────────────────────────
 
         event_id = str(uuid.uuid4())
 
