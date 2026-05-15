@@ -78,15 +78,26 @@ async def dm(bot_token: str, user_id: str, text: str, blocks: list = None):
     await slack_api(bot_token, "chat.postMessage", payload)
 
 
-async def post_to_channel(bot_token: str, channel_id: str, text: str, blocks: list = None):
+async def post_to_channel(bot_token: str, channel_id: str, text: str, blocks: list = None, fallback_user_id: str = None):
     """
-    Post a message directly to a channel or DM conversation.
-    Used to send meeting results back to where /meet was typed.
+    Post to a channel or DM intelligently:
+    - Real channels (C...) → post directly
+    - User-to-user DMs (D...) or anything else → use conversations.open via dm()
+      so the bot always has access, exactly like the original working code.
     """
-    payload = {"channel": channel_id, "text": text}
-    if blocks:
-        payload["blocks"] = blocks
-    await slack_api(bot_token, "chat.postMessage", payload)
+    # Slack channel IDs starting with C = public/private channel (bot can post if member)
+    # D = direct message between users (bot cannot post directly, must use conversations.open)
+    if channel_id and channel_id.startswith("C"):
+        payload = {"channel": channel_id, "text": text}
+        if blocks:
+            payload["blocks"] = blocks
+        result = await slack_api(bot_token, "chat.postMessage", payload)
+        if not result.get("ok") and fallback_user_id:
+            print(f"DEBUG channel post failed ({result.get('error')}), falling back to DM with {fallback_user_id}")
+            await dm(bot_token, fallback_user_id, text, blocks)
+    elif fallback_user_id:
+        # DM context — use conversations.open so bot can always reach the user
+        await dm(bot_token, fallback_user_id, text, blocks)
 
 
 async def respond(response_url: str, payload: dict):
@@ -458,7 +469,8 @@ async def handle_instant_meet(
         organiser = get_db_user(db, user_id)
         if not organiser:
             await post_to_channel(bot_token, channel_id,
-                     f"⚠️ Connect Google first: {BASE_URL}/auth?user_id={user_id}&team_id={team_id}")
+                     f"⚠️ Connect Google first: {BASE_URL}/auth?user_id={user_id}&team_id={team_id}",
+                     fallback_user_id=user_id)
             return
 
         # Get invited person's email for Google Calendar invite
@@ -477,7 +489,8 @@ async def handle_instant_meet(
         )
         if not meet_link:
             await post_to_channel(bot_token, channel_id,
-                     "❌ Failed to create meeting. Check your Google Calendar access.")
+                     "❌ Failed to create meeting. Check your Google Calendar access.",
+                     fallback_user_id=user_id)
             return
 
         # Save for cancel
@@ -513,13 +526,14 @@ async def handle_instant_meet(
                                if invited_email else "no email found, invite skipped")
                             if invited_member else "_No one invited_")}},
                 {"type": "actions", "elements": cancel_btn}
-            ])
+            ],
+            fallback_user_id=user_id)
 
         # Invited person sees the message in the same channel where /meet was typed
 
     except Exception as e:
         print("🔥 handle_instant_meet ERROR:", str(e))
-        await post_to_channel(bot_token, channel_id, "❌ Something went wrong creating the meeting.")
+        await post_to_channel(bot_token, channel_id, "❌ Something went wrong creating the meeting.", fallback_user_id=user_id)
     finally:
         db.close()
 
@@ -536,7 +550,8 @@ async def handle_scheduled_meet(
         organiser = get_db_user(db, user_id)
         if not organiser:
             await post_to_channel(bot_token, channel_id,
-                     f"⚠️ Connect Google first: {BASE_URL}/auth?user_id={user_id}&team_id={team_id}")
+                     f"⚠️ Connect Google first: {BASE_URL}/auth?user_id={user_id}&team_id={team_id}",
+                     fallback_user_id=user_id)
             return
 
         # Look up invited person
@@ -556,7 +571,7 @@ async def handle_scheduled_meet(
             attendee_emails=[invited_email] if invited_email else None
         )
         if not meet_link:
-            await post_to_channel(bot_token, channel_id, "❌ Failed to schedule meeting.")
+            await post_to_channel(bot_token, channel_id, "❌ Failed to schedule meeting.", fallback_user_id=user_id)
             return
 
         event_id = str(uuid.uuid4())
@@ -597,14 +612,15 @@ async def handle_scheduled_meet(
                                if invited_email else "no email found, invite skipped")
                             if invited_member else "")}},
                 {"type": "actions", "elements": cancel_btn}
-            ])
+            ],
+            fallback_user_id=user_id)
 
         # Invited person sees the message in the same channel where /meet was typed
 
     except Exception as e:
         print("🔥 handle_scheduled_meet ERROR:", str(e))
         if bot_token:
-            await post_to_channel(bot_token, channel_id, "❌ Something went wrong scheduling the meeting.")
+            await post_to_channel(bot_token, channel_id, "❌ Something went wrong scheduling the meeting.", fallback_user_id=user_id)
     finally:
         db.close()
 
@@ -710,7 +726,8 @@ async def handle_cancel_meeting(
         record = db.query(MeetingRecord).filter(MeetingRecord.event_id == event_id).first()
         if not record:
             await post_to_channel(bot_token, channel_id,
-                     "⚠️ Meeting not found — it may already have been cancelled.")
+                     "⚠️ Meeting not found — it may already have been cancelled.",
+                     fallback_user_id=slack_user_id)
             return
 
         organiser   = get_db_user(db, user_id)
@@ -721,11 +738,11 @@ async def handle_cancel_meeting(
         msg = (f"✅ *{title}* cancelled and removed from Google Calendar."
                if cal_deleted else
                f"⚠️ *{title}* removed from MeetNow but couldn't delete from Google Calendar — remove manually.")
-        await post_to_channel(bot_token, channel_id, msg)
+        await post_to_channel(bot_token, channel_id, msg, fallback_user_id=slack_user_id)
 
     except Exception as e:
         print("🔥 handle_cancel_meeting ERROR:", str(e))
         if bot_token:
-            await post_to_channel(bot_token, channel_id, "❌ Something went wrong cancelling.")
+            await post_to_channel(bot_token, channel_id, "❌ Something went wrong cancelling.", fallback_user_id=slack_user_id)
     finally:
         db.close()
