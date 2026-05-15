@@ -78,6 +78,17 @@ async def dm(bot_token: str, user_id: str, text: str, blocks: list = None):
     await slack_api(bot_token, "chat.postMessage", payload)
 
 
+async def post_to_channel(bot_token: str, channel_id: str, text: str, blocks: list = None):
+    """
+    Post a message directly to a channel or DM conversation.
+    Used to send meeting results back to where /meet was typed.
+    """
+    payload = {"channel": channel_id, "text": text}
+    if blocks:
+        payload["blocks"] = blocks
+    await slack_api(bot_token, "chat.postMessage", payload)
+
+
 async def respond(response_url: str, payload: dict):
     """Ack back to slash command via response_url."""
     async with httpx.AsyncClient() as client:
@@ -254,7 +265,7 @@ async def handle_meet(
                 "replace_original": True, "response_type": "ephemeral",
                 "text": "⏳ Creating your meeting..."
             })
-            await handle_instant_meet(user_id, team_id, invited_member, bot_token)
+            await handle_instant_meet(user_id, team_id, channel_id, invited_member, bot_token)
             return
 
         if any(w in text_lower for w in ["schedule", "later", "plan"]):
@@ -336,6 +347,7 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
                 background_tasks.add_task(
                     handle_scheduled_meet,
                     meta["user_id"], meta["team_id"],
+                    meta.get("channel_id") or "",
                     meta.get("invited_user_id") or None,
                     title, date, time, duration, notes
                 )
@@ -346,7 +358,8 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
                 background_tasks.add_task(
                     handle_cancel_meeting,
                     meta["user_id"], meta["team_id"],
-                    meta["event_id"], meta["slack_user_id"], meta["title"]
+                    meta["event_id"], meta["slack_user_id"],
+                    meta["title"], meta.get("channel_id", "")
                 )
                 return JSONResponse({})
 
@@ -394,7 +407,7 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
                             invited_member = m
                             break
                 background_tasks.add_task(
-                    handle_instant_meet, user_id, team_id_val, invited_member, bot_token
+                    handle_instant_meet, user_id, team_id_val, channel_id, invited_member, bot_token
                 )
             else:
                 await respond(response_url, {
@@ -412,7 +425,8 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
             background_tasks.add_task(
                 open_cancel_modal,
                 trigger_id, ctx["event_id"], ctx["user_id"],
-                ctx["team_id"], ctx["title"], slack_user, bot_token
+                ctx["team_id"], ctx["title"], slack_user,
+                ctx.get("channel_id", ""), bot_token
             )
             return JSONResponse({})
 
@@ -429,6 +443,7 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
 
 async def handle_instant_meet(
     user_id: str, team_id: str,
+    channel_id: str,
     invited_member: dict | None,
     bot_token: str
 ):
@@ -442,7 +457,7 @@ async def handle_instant_meet(
     try:
         organiser = get_db_user(db, user_id)
         if not organiser:
-            await dm(bot_token, user_id,
+            await post_to_channel(bot_token, channel_id,
                      f"⚠️ Connect Google first: {BASE_URL}/auth?user_id={user_id}&team_id={team_id}")
             return
 
@@ -461,7 +476,7 @@ async def handle_instant_meet(
             attendee_emails=[invited_email] if invited_email else None
         )
         if not meet_link:
-            await dm(bot_token, user_id,
+            await post_to_channel(bot_token, channel_id,
                      "❌ Failed to create meeting. Check your Google Calendar access.")
             return
 
@@ -477,7 +492,8 @@ async def handle_instant_meet(
         my_name    = await get_my_name(bot_token, user_id)
         cancel_val = json.dumps({
             "event_id": event_id, "user_id": user_id,
-            "team_id": team_id, "title": "Instant Meeting"
+            "team_id": team_id, "title": "Instant Meeting",
+            "channel_id": channel_id
         })
         cancel_btn = [{
             "type": "button", "style": "danger",
@@ -485,8 +501,8 @@ async def handle_instant_meet(
             "action_id": "cancel_meeting", "value": cancel_val
         }]
 
-        # ✅ DM the organiser (you)
-        await dm(bot_token, user_id,
+        # ✅ Post to the channel/DM where /meet was typed
+        await post_to_channel(bot_token, channel_id,
             text=f"✅ Meeting live: {meet_link}",
             blocks=[
                 {"type": "section", "text": {"type": "mrkdwn",
@@ -499,31 +515,18 @@ async def handle_instant_meet(
                 {"type": "actions", "elements": cancel_btn}
             ])
 
-        # ✅ DM the invited person (Pranjal)
-        if invited_id and invited_id != user_id:
-            await dm(bot_token, invited_id,
-                text=f"📞 {my_name} invited you to a meeting: {meet_link}",
-                blocks=[
-                    {"type": "section", "text": {"type": "mrkdwn",
-                     "text": f"👋 *{my_name} invited you to a Google Meet!*\n\n"
-                             f"📞 *Click to join:* {meet_link}"
-                             + ("\n\n_Also check your email for the Google Calendar invite._"
-                                if invited_email else "")}},
-                    {"type": "context", "elements": [
-                        {"type": "mrkdwn",
-                         "text": "This is a private message — only you can see it."}
-                    ]}
-                ])
+        # Invited person sees the message in the same channel where /meet was typed
 
     except Exception as e:
         print("🔥 handle_instant_meet ERROR:", str(e))
-        await dm(bot_token, user_id, "❌ Something went wrong creating the meeting.")
+        await post_to_channel(bot_token, channel_id, "❌ Something went wrong creating the meeting.")
     finally:
         db.close()
 
 
 async def handle_scheduled_meet(
     user_id: str, team_id: str,
+    channel_id: str,
     invited_user_id: str | None,
     title: str, date: str, time: str, duration: int, notes: str
 ):
@@ -532,7 +535,7 @@ async def handle_scheduled_meet(
     try:
         organiser = get_db_user(db, user_id)
         if not organiser:
-            await dm(bot_token, user_id,
+            await post_to_channel(bot_token, channel_id,
                      f"⚠️ Connect Google first: {BASE_URL}/auth?user_id={user_id}&team_id={team_id}")
             return
 
@@ -553,7 +556,7 @@ async def handle_scheduled_meet(
             attendee_emails=[invited_email] if invited_email else None
         )
         if not meet_link:
-            await dm(bot_token, user_id, "❌ Failed to schedule meeting.")
+            await post_to_channel(bot_token, channel_id, "❌ Failed to schedule meeting.")
             return
 
         event_id = str(uuid.uuid4())
@@ -567,7 +570,8 @@ async def handle_scheduled_meet(
         my_name    = await get_my_name(bot_token, user_id)
         cancel_val = json.dumps({
             "event_id": event_id, "user_id": user_id,
-            "team_id": team_id, "title": title
+            "team_id": team_id, "title": title,
+            "channel_id": channel_id
         })
         cancel_btn = [{
             "type": "button", "style": "danger",
@@ -582,8 +586,8 @@ async def handle_scheduled_meet(
             + (f"\n📝 _{notes}_" if notes else "")
         )
 
-        # ✅ DM organiser
-        await dm(bot_token, user_id,
+        # ✅ Post to channel/DM where /meet was typed
+        await post_to_channel(bot_token, channel_id,
             text=f"✅ Meeting scheduled: {meet_link}",
             blocks=[
                 {"type": "section", "text": {"type": "mrkdwn",
@@ -595,26 +599,12 @@ async def handle_scheduled_meet(
                 {"type": "actions", "elements": cancel_btn}
             ])
 
-        # ✅ DM invited person
-        if invited_user_id and invited_user_id != user_id:
-            await dm(bot_token, invited_user_id,
-                text=f"📅 {my_name} scheduled a meeting with you: {meet_link}",
-                blocks=[
-                    {"type": "section", "text": {"type": "mrkdwn",
-                     "text": f"👋 *{my_name} scheduled a meeting with you!*\n\n"
-                             f"{summary}"
-                             + ("\n\n_Check your email for the Google Calendar invite._"
-                                if invited_email else "")}},
-                    {"type": "context", "elements": [
-                        {"type": "mrkdwn",
-                         "text": "This is a private message — only you can see it."}
-                    ]}
-                ])
+        # Invited person sees the message in the same channel where /meet was typed
 
     except Exception as e:
         print("🔥 handle_scheduled_meet ERROR:", str(e))
         if bot_token:
-            await dm(bot_token, user_id, "❌ Something went wrong scheduling the meeting.")
+            await post_to_channel(bot_token, channel_id, "❌ Something went wrong scheduling the meeting.")
     finally:
         db.close()
 
@@ -682,11 +672,12 @@ async def open_schedule_modal(
 
 async def open_cancel_modal(
     trigger_id: str, event_id: str, user_id: str, team_id: str,
-    title: str, slack_user_id: str, bot_token: str
+    title: str, slack_user_id: str, channel_id: str, bot_token: str
 ):
     meta = json.dumps({
         "event_id": event_id, "user_id": user_id,
-        "team_id": team_id, "slack_user_id": slack_user_id, "title": title
+        "team_id": team_id, "slack_user_id": slack_user_id,
+        "title": title, "channel_id": channel_id
     })
     modal = {
         "trigger_id": trigger_id,
@@ -711,14 +702,14 @@ async def open_cancel_modal(
 
 async def handle_cancel_meeting(
     user_id: str, team_id: str,
-    event_id: str, slack_user_id: str, title: str
+    event_id: str, slack_user_id: str, title: str, channel_id: str
 ):
     db = SessionLocal()
     bot_token = get_token(team_id)
     try:
         record = db.query(MeetingRecord).filter(MeetingRecord.event_id == event_id).first()
         if not record:
-            await dm(bot_token, slack_user_id,
+            await post_to_channel(bot_token, channel_id,
                      "⚠️ Meeting not found — it may already have been cancelled.")
             return
 
@@ -730,11 +721,11 @@ async def handle_cancel_meeting(
         msg = (f"✅ *{title}* cancelled and removed from Google Calendar."
                if cal_deleted else
                f"⚠️ *{title}* removed from MeetNow but couldn't delete from Google Calendar — remove manually.")
-        await dm(bot_token, slack_user_id, msg)
+        await post_to_channel(bot_token, channel_id, msg)
 
     except Exception as e:
         print("🔥 handle_cancel_meeting ERROR:", str(e))
         if bot_token:
-            await dm(bot_token, slack_user_id, "❌ Something went wrong cancelling.")
+            await post_to_channel(bot_token, channel_id, "❌ Something went wrong cancelling.")
     finally:
         db.close()
