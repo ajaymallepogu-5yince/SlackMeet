@@ -1,18 +1,3 @@
-"""
-routes/slack.py
-────────────────────────────────────────────────────────
-
-MeetNow Slack Integration
-
-Features:
-✅ /meet @user
-✅ Native DM → converts to MPIM automatically
-✅ Posts inside SAME conversation
-✅ Channels supported
-✅ Private channels supported
-✅ Google Meet generation
-✅ Google Calendar invites
-"""
 
 import json
 import re
@@ -41,6 +26,7 @@ from services.google import (
 )
 
 router = APIRouter()
+
 
 # ─────────────────────────────────────────────────────────────────
 # Database Helpers
@@ -110,21 +96,25 @@ async def slack_api(
 
     return data
 
+
+# ─────────────────────────────────────────────────────────────────
+# Respond Back Into SAME Slack Conversation
+# ─────────────────────────────────────────────────────────────────
+
 async def respond_in_channel(
     response_url: str,
     text: str,
     blocks: list = None
 ):
     """
-    Respond directly into the SAME Slack conversation
-    using response_url.
+    Respond directly into SAME Slack conversation.
 
-    Works perfectly in:
-    - native DMs
-    - channels
-    - private channels
+    Works in:
+    - Native DMs
+    - Channels
+    - Private channels
 
-    WITHOUT creating MPIMs/groups.
+    WITHOUT creating extra groups.
     """
 
     payload = {
@@ -147,6 +137,7 @@ async def respond_in_channel(
         "DEBUG response_url:",
         response.status_code
     )
+
 
 # ─────────────────────────────────────────────────────────────────
 # User Cache
@@ -233,6 +224,7 @@ async def resolve_invited_user(
         profile = m.get("profile", {})
 
         candidates = {
+
             (
                 profile.get("display_name") or ""
             ).lower(),
@@ -273,91 +265,6 @@ def member_display_name(member: dict):
 
 
 # ─────────────────────────────────────────────────────────────────
-# Conversation Handling
-# ─────────────────────────────────────────────────────────────────
-
-
-    """
-    Native DM → convert to MPIM
-    """
-
-    # Channels already work
-    if (
-        channel_id.startswith("C")
-        or channel_id.startswith("G")
-    ):
-        return channel_id
-
-    if not invited_user_id:
-        return channel_id
-
-    result = await slack_api(
-        bot_token,
-        "conversations.open",
-        {
-            "users": (
-                f"{organiser_id},"
-                f"{invited_user_id}"
-            )
-        }
-    )
-
-    if not result.get("ok"):
-
-        print(
-            "🔥 Failed creating MPIM:",
-            result
-        )
-
-        return channel_id
-
-    new_channel = (
-        result.get("channel", {})
-        .get("id")
-    )
-
-    print(
-        f"✅ Converted DM "
-        f"{channel_id} → {new_channel}"
-    )
-
-    return new_channel or channel_id
-
-
-# ─────────────────────────────────────────────────────────────────
-# Posting Messages
-# ─────────────────────────────────────────────────────────────────
-
-async def post_to_channel(
-    bot_token: str,
-    channel_id: str,
-    text: str,
-    blocks: list = None
-):
-
-    payload = {
-        "channel": channel_id,
-        "text": text,
-    }
-
-    if blocks:
-        payload["blocks"] = blocks
-
-    result = await slack_api(
-        bot_token,
-        "chat.postMessage",
-        payload
-    )
-
-    if not result.get("ok"):
-
-        print(
-            f"🔥 Failed posting "
-            f"to {channel_id}"
-        )
-
-
-# ─────────────────────────────────────────────────────────────────
 # Slash Command
 # ─────────────────────────────────────────────────────────────────
 
@@ -394,7 +301,15 @@ async def meet(
             f"text={text}"
         )
 
-        background_tasks.add_task( handle_instant_meet, user_id, team_id, channel_id, uid, uname, response_url, )
+        background_tasks.add_task(
+            handle_instant_meet,
+            user_id,
+            team_id,
+            channel_id,
+            uid,
+            uname,
+            response_url,
+        )
 
         return JSONResponse({
             "response_type": "ephemeral",
@@ -418,7 +333,14 @@ async def meet(
 # Main Meeting Logic
 # ─────────────────────────────────────────────────────────────────
 
-async def handle_instant_meet( user_id: str, team_id: str, channel_id: str, uid: str | None, uname: str | None, response_url: str, ):
+async def handle_instant_meet(
+    user_id: str,
+    team_id: str,
+    channel_id: str,
+    uid: str | None,
+    uname: str | None,
+    response_url: str,
+):
 
     db = SessionLocal()
 
@@ -430,12 +352,6 @@ async def handle_instant_meet( user_id: str, team_id: str, channel_id: str, uid:
             bot_token,
             uid,
             uname,
-        )
-
-        invited_user_id = (
-            invited_member.get("id")
-            if invited_member
-            else None
         )
 
         invited_email = (
@@ -457,9 +373,8 @@ async def handle_instant_meet( user_id: str, team_id: str, channel_id: str, uid:
 
         if not organiser:
 
-            await post_to_channel(
-                bot_token,
-                channel_id,
+            await respond_in_channel(
+                response_url,
                 (
                     "⚠️ Please connect Google first:\n"
                     f"{BASE_URL}/auth"
@@ -470,10 +385,8 @@ async def handle_instant_meet( user_id: str, team_id: str, channel_id: str, uid:
 
             return
 
-        # Convert native DM → MPIM
-       
-
         # Create Google Meet
+
         meet_link, cal_event_id = create_meeting(
             organiser,
             attendee_emails=[invited_email]
@@ -483,15 +396,15 @@ async def handle_instant_meet( user_id: str, team_id: str, channel_id: str, uid:
 
         if not meet_link:
 
-            await post_to_channel(
-                bot_token,
-                channel_id,
+            await respond_in_channel(
+                response_url,
                 "❌ Failed to create meeting."
             )
 
             return
 
         # Save meeting
+
         event_id = str(uuid.uuid4())
 
         db.add(
@@ -551,7 +464,11 @@ async def handle_instant_meet( user_id: str, team_id: str, channel_id: str, uid:
             }
         ]
 
-        await respond_in_channel( response_url, f"Meeting ready: {meet_link}", blocks )
+        await respond_in_channel(
+            response_url,
+            f"Meeting ready: {meet_link}",
+            blocks
+        )
 
     except Exception as e:
 
@@ -562,4 +479,3 @@ async def handle_instant_meet( user_id: str, team_id: str, channel_id: str, uid:
 
     finally:
         db.close()
-
