@@ -110,6 +110,43 @@ async def slack_api(
 
     return data
 
+async def respond_in_channel(
+    response_url: str,
+    text: str,
+    blocks: list = None
+):
+    """
+    Respond directly into the SAME Slack conversation
+    using response_url.
+
+    Works perfectly in:
+    - native DMs
+    - channels
+    - private channels
+
+    WITHOUT creating MPIMs/groups.
+    """
+
+    payload = {
+        "response_type": "in_channel",
+        "text": text,
+    }
+
+    if blocks:
+        payload["blocks"] = blocks
+
+    async with httpx.AsyncClient() as client:
+
+        response = await client.post(
+            response_url,
+            json=payload,
+            timeout=20,
+        )
+
+    print(
+        "DEBUG response_url:",
+        response.status_code
+    )
 
 # ─────────────────────────────────────────────────────────────────
 # User Cache
@@ -239,12 +276,7 @@ def member_display_name(member: dict):
 # Conversation Handling
 # ─────────────────────────────────────────────────────────────────
 
-async def ensure_conversation_for_meeting(
-    bot_token: str,
-    channel_id: str,
-    organiser_id: str,
-    invited_user_id: str | None,
-):
+
     """
     Native DM → convert to MPIM
     """
@@ -362,14 +394,7 @@ async def meet(
             f"text={text}"
         )
 
-        background_tasks.add_task(
-            handle_instant_meet,
-            user_id,
-            team_id,
-            channel_id,
-            uid,
-            uname,
-        )
+        background_tasks.add_task( handle_instant_meet, user_id, team_id, channel_id, uid, uname, response_url, )
 
         return JSONResponse({
             "response_type": "ephemeral",
@@ -393,13 +418,7 @@ async def meet(
 # Main Meeting Logic
 # ─────────────────────────────────────────────────────────────────
 
-async def handle_instant_meet(
-    user_id: str,
-    team_id: str,
-    channel_id: str,
-    uid: str | None,
-    uname: str | None,
-):
+async def handle_instant_meet( user_id: str, team_id: str, channel_id: str, uid: str | None, uname: str | None, response_url: str, ):
 
     db = SessionLocal()
 
@@ -452,12 +471,7 @@ async def handle_instant_meet(
             return
 
         # Convert native DM → MPIM
-        channel_id = await ensure_conversation_for_meeting(
-            bot_token,
-            channel_id,
-            user_id,
-            invited_user_id,
-        )
+       
 
         # Create Google Meet
         meet_link, cal_event_id = create_meeting(
@@ -537,12 +551,7 @@ async def handle_instant_meet(
             }
         ]
 
-        await post_to_channel(
-            bot_token,
-            channel_id,
-            f"Meeting ready: {meet_link}",
-            blocks
-        )
+        await respond_in_channel( response_url, f"Meeting ready: {meet_link}", blocks )
 
     except Exception as e:
 
