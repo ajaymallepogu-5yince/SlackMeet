@@ -80,24 +80,13 @@ async def dm(bot_token: str, user_id: str, text: str, blocks: list = None):
 
 async def post_to_channel(bot_token: str, channel_id: str, text: str, blocks: list = None, fallback_user_id: str = None):
     """
-    Post to a channel or DM intelligently:
-    - Real channels (C...) → post directly
-    - User-to-user DMs (D...) or anything else → use conversations.open via dm()
-      so the bot always has access, exactly like the original working code.
+    Post directly to wherever /meet was typed — channel or DM.
+    channel_id from the slash command is always valid for chat.postMessage.
     """
-    # Slack channel IDs starting with C = public/private channel (bot can post if member)
-    # D = direct message between users (bot cannot post directly, must use conversations.open)
-    if channel_id and channel_id.startswith("C"):
-        payload = {"channel": channel_id, "text": text}
-        if blocks:
-            payload["blocks"] = blocks
-        result = await slack_api(bot_token, "chat.postMessage", payload)
-        if not result.get("ok") and fallback_user_id:
-            print(f"DEBUG channel post failed ({result.get('error')}), falling back to DM with {fallback_user_id}")
-            await dm(bot_token, fallback_user_id, text, blocks)
-    elif fallback_user_id:
-        # DM context — use conversations.open so bot can always reach the user
-        await dm(bot_token, fallback_user_id, text, blocks)
+    payload = {"channel": channel_id, "text": text}
+    if blocks:
+        payload["blocks"] = blocks
+    await slack_api(bot_token, "chat.postMessage", payload)
 
 
 async def respond(response_url: str, payload: dict):
@@ -219,7 +208,7 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
         background_tasks.add_task(
             handle_meet, user_id, team_id, channel_id, text, uid, uname, response_url, trigger_id
         )
-        return JSONResponse({"response_type": "ephemeral", "text": "⏳ On it..."})
+        return JSONResponse({"response_type": "ephemeral", "text": ""})
 
     except Exception as e:
         print("🔥 /meet ERROR:", str(e))
@@ -272,18 +261,10 @@ async def handle_meet(
         text_lower = text.lower()
 
         if any(w in text_lower for w in ["connect", "now", "instant"]):
-            await respond(response_url, {
-                "replace_original": True, "response_type": "ephemeral",
-                "text": "⏳ Creating your meeting..."
-            })
             await handle_instant_meet(user_id, team_id, channel_id, invited_member, bot_token)
             return
 
         if any(w in text_lower for w in ["schedule", "later", "plan"]):
-            await respond(response_url, {
-                "replace_original": True, "response_type": "ephemeral",
-                "text": "📅 Opening scheduler..."
-            })
             await open_schedule_modal(trigger_id, user_id, team_id, channel_id, invited_user_id, bot_token)
             return
 
@@ -405,10 +386,6 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
             _used_sessions.add(sid)
 
             if action_id == "choice_instant":
-                await respond(response_url, {
-                    "replace_original": True, "response_type": "ephemeral",
-                    "text": "⏳ Creating your meeting..."
-                })
                 # Re-resolve invited member from stored user_id
                 invited_member = None
                 if invited_uid:
@@ -421,10 +398,6 @@ async def actions(request: Request, background_tasks: BackgroundTasks):
                     handle_instant_meet, user_id, team_id_val, channel_id, invited_member, bot_token
                 )
             else:
-                await respond(response_url, {
-                    "replace_original": True, "response_type": "ephemeral",
-                    "text": "📅 Opening scheduler..."
-                })
                 background_tasks.add_task(
                     open_schedule_modal, trigger_id, user_id, team_id_val, channel_id, invited_uid, bot_token
                 )
