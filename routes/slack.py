@@ -99,7 +99,7 @@ async def slack_api(
 
 
 # ─────────────────────────────────────────────────────────────────
-# Public Response
+# Public Response (via response_url)
 # ─────────────────────────────────────────────────────────────────
 
 async def respond_in_channel(
@@ -136,7 +136,7 @@ async def respond_in_channel(
 
 
 # ─────────────────────────────────────────────────────────────────
-# Private Response
+# Private Response (ephemeral, via response_url)
 # ─────────────────────────────────────────────────────────────────
 
 async def respond_to_user(
@@ -164,6 +164,61 @@ async def respond_to_user(
     print(
         "DEBUG ephemeral:",
         response.status_code
+    )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Post message to channel and return (channel_id, ts)
+# Use this instead of respond_in_channel when we need to delete later
+# ─────────────────────────────────────────────────────────────────
+
+async def post_message_to_channel(
+    bot_token: str,
+    channel_id: str,
+    text: str,
+    blocks: list = None,
+) -> tuple[str | None, str | None]:
+    """Post a message via chat.postMessage and return (channel_id, ts)."""
+
+    payload = {
+        "channel": channel_id,
+        "text": text,
+    }
+
+    if blocks:
+        payload["blocks"] = blocks
+
+    result = await slack_api(
+        bot_token,
+        "chat.postMessage",
+        payload,
+    )
+
+    ts = result.get("ts")
+    ch = result.get("channel")
+
+    return ch, ts
+
+
+# ─────────────────────────────────────────────────────────────────
+# Delete a Slack message
+# ─────────────────────────────────────────────────────────────────
+
+async def delete_slack_message(
+    bot_token: str,
+    channel_id: str,
+    message_ts: str,
+):
+    if not channel_id or not message_ts:
+        return
+
+    await slack_api(
+        bot_token,
+        "chat.delete",
+        {
+            "channel": channel_id,
+            "ts": message_ts,
+        }
     )
 
 
@@ -358,7 +413,7 @@ async def meet(
         )
 
         # ---------------------------------------------------------
-        # AUTO START INSTANT MEETING
+        # AUTO START INSTANT MEETING (keyword triggered)
         # ---------------------------------------------------------
 
         if should_start_instant:
@@ -376,6 +431,10 @@ async def meet(
                 "response_type": "ephemeral",
                 "text": "🚀 Starting instant meeting..."
             })
+
+        # ---------------------------------------------------------
+        # Show Connect Now / Schedule Later buttons
+        # ---------------------------------------------------------
 
         shared_session_id = str(uuid.uuid4())
 
@@ -401,6 +460,8 @@ async def meet(
                         "type": "mrkdwn",
                         "text": (
                             f"🤝 Meeting with <@{uid}>"
+                            if uid
+                            else "🤝 Start a meeting"
                         )
                     }
                 },
@@ -462,6 +523,7 @@ async def meet(
 async def handle_cancel_meeting(
     event_id: str,
     user_id: str,
+    team_id: str,
 ):
 
     db = SessionLocal()
@@ -477,28 +539,29 @@ async def handle_cancel_meeting(
         if not record:
             return
 
-        organiser = get_db_user(
-            db,
-            user_id
-        )
+        bot_token = get_token(team_id)
 
-        if (
-            organiser
-            and record.calendar_event_id
-        ):
+        # Delete the Slack message that had the meeting link + buttons
+        if record.channel_id and record.slack_message_ts:
+            await delete_slack_message(
+                bot_token,
+                record.channel_id,
+                record.slack_message_ts,
+            )
 
+        # Cancel the Google Calendar event
+        organiser = get_db_user(db, user_id)
+
+        if organiser and record.calendar_event_id:
             cancel_calendar_event(
                 organiser,
                 record.calendar_event_id
             )
 
         db.delete(record)
-
         db.commit()
 
-        print(
-            f"✅ Meeting cancelled: {event_id}"
-        )
+        print(f"✅ Meeting cancelled: {event_id}")
 
     except Exception as e:
 
@@ -538,27 +601,40 @@ async def slack_actions(
             value = json.loads(
                 action.get("value", "{}")
             )
-            session_id = value.get(
-                "session_id"
-            )
+            session_id = value.get("session_id")
             action_id = action.get("action_id")
 
             # ---------------------------------------------------------
             # DEAD SESSION CHECK
+            # Only applies to connect_now and schedule_meeting buttons
+            # (not cancel_meeting which has its own event_id logic)
             # ---------------------------------------------------------
-            if session_id in _used_sessions:
+            if (
+                action_id in ("connect_now", "schedule_meeting")
+                and session_id in _used_sessions
+            ):
                 return JSONResponse({
                     "response_type": "ephemeral",
-                    "text": (
-                        "⚠️ This meeting session has expired.\n\n"
-                        "Use `/meet` again to start a new meeting."
-                    )
+                    "replace_original": True,
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": (
+                                    "⚠️ *These buttons have expired.*\n\n"
+                                    "Use `/meet @user` again to start a new meeting."
+                                )
+                            }
+                        }
+                    ]
                 })
 
             # -----------------------------------------------------
             # CONNECT NOW
             # -----------------------------------------------------
             if action_id == "connect_now":
+                # Mark this session as used — expires the other button too
                 _used_sessions.add(session_id)
 
                 background_tasks.add_task(
@@ -571,12 +647,26 @@ async def slack_actions(
                     value["response_url"],
                 )
 
-                return JSONResponse({})
+                # Replace the original ephemeral with a "processing" message
+                return JSONResponse({
+                    "response_type": "ephemeral",
+                    "replace_original": True,
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "🚀 Starting instant meeting..."
+                            }
+                        }
+                    ]
+                })
 
             # -----------------------------------------------------
             # SCHEDULE MEETING
             # -----------------------------------------------------
             if action_id == "schedule_meeting":
+                # Mark this session as used — expires the other button too
                 _used_sessions.add(session_id)
 
                 await open_schedule_modal(
@@ -585,127 +675,61 @@ async def slack_actions(
                     team_id=value["team_id"],
                 )
 
-                return JSONResponse({})
-
-            # -----------------------------------------------------
-            # CANCEL MEETING
-            # -----------------------------------------------------
-            if action_id == "cancel_meeting":
-
-                db = SessionLocal()
-
-                record = db.query(MeetingRecord).filter(
-                    MeetingRecord.event_id == value["event_id"]
-                ).first()
-
-                if record:
-                    bot_token = get_token(value["team_id"])
-
-                    # Delete the original meeting message
-                    if record.channel_id and record.slack_message_ts:
-                        await slack_api(
-                            bot_token,
-                            "chat.delete",
-                            {
-                                "channel": record.channel_id,
-                                "ts": record.slack_message_ts,
-                            }
-                        )
-
-                    reconnect_session_id = str(uuid.uuid4())
-
-                    reconnect_value = json.dumps({
-                        "session_id": reconnect_session_id,
-                        "user_id": value["user_id"],
-                        "team_id": value["team_id"],
-                        "channel_id": value["channel_id"],
-                        "uid": value.get("uid"),
-                        "uname": value.get("uname"),
-                        "response_url": value["response_url"],
-                    })
-
-                    # Post "what next" via response_url
-                    await respond_in_channel(
-                        value["response_url"],
-                        "Meeting Cancelled",
-                        blocks=[
-                            {
-                                "type": "section",
-                                "text": {
-                                    "type": "mrkdwn",
-                                    "text": (
-                                        "❌ *Meeting Cancelled*\n\n"
-                                        "The meeting and calendar event "
-                                        "were cancelled successfully.\n\n"
-                                        "*What would you like to do next?*"
-                                    )
-                                }
-                            },
-                            {
-                                "type": "actions",
-                                "elements": [
-                                    {
-                                        "type": "button",
-                                        "style": "primary",
-                                        "text": {
-                                            "type": "plain_text",
-                                            "text": "⚡ Connect Now"
-                                        },
-                                        "action_id": "connect_now",
-                                        "value": reconnect_value
-                                    },
-                                    {
-                                        "type": "button",
-                                        "text": {
-                                            "type": "plain_text",
-                                            "text": "📅 Schedule Later"
-                                        },
-                                        "action_id": "schedule_meeting",
-                                        "value": reconnect_value
-                                    },
-                                    {
-                                        "type": "button",
-                                        "style": "danger",
-                                        "text": {
-                                            "type": "plain_text",
-                                            "text": "🛑 Stop"
-                                        },
-                                        "action_id": "stop_meeting_flow",
-                                        "value": json.dumps({
-                                            "session_id": str(uuid.uuid4())
-                                        })
-                                    }
-                                ]
-                            }
-                        ]
-                    )
-
-                    background_tasks.add_task(
-                        handle_cancel_meeting,
-                        value["event_id"],
-                        value["user_id"],
-                    )
-
-                db.close()
-
-                return JSONResponse({})
-
-            # -----------------------------------------------------
-            # STOP FLOW
-            # -----------------------------------------------------
-            if action_id == "stop_meeting_flow":
+                # Replace the original ephemeral with a "processing" message
                 return JSONResponse({
+                    "response_type": "ephemeral",
                     "replace_original": True,
                     "blocks": [
                         {
                             "type": "section",
                             "text": {
                                 "type": "mrkdwn",
-                                "text": "✅ Meeting flow closed."
+                                "text": "📅 Opening schedule form..."
                             }
                         }
                     ]
                 })
+
+            # -----------------------------------------------------
+            # CANCEL MEETING
+            # -----------------------------------------------------
+            if action_id == "cancel_meeting":
+
+                event_id = value.get("event_id")
+
+                if not event_id:
+                    return JSONResponse({})
+
+                # Post "Meeting Cancelled" notice to the channel
+                # (the meeting message itself is deleted inside handle_cancel_meeting)
+                await respond_in_channel(
+                    value["response_url"],
+                    "❌ Meeting Cancelled",
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": (
+                                    "❌ *Meeting Cancelled*\n\n"
+                                    "The meeting and calendar event "
+                                    "were cancelled successfully.\n\n"
+                                    "Use `/meet @user` to start a new meeting."
+                                )
+                            }
+                        }
+                    ]
+                )
+
+                # Delete meeting message + cancel calendar in background
+                background_tasks.add_task(
+                    handle_cancel_meeting,
+                    event_id,
+                    value["user_id"],
+                    value["team_id"],
+                )
+
+                return JSONResponse({})
 
         # =========================================================
         # MODAL SUBMIT
@@ -803,10 +827,7 @@ async def handle_instant_meet(
             else "Guest"
         )
 
-        organiser = get_db_user(
-            db,
-            user_id
-        )
+        organiser = get_db_user(db, user_id)
 
         # ─────────────────────────────────────────────────────────
         # Google Not Connected
@@ -883,21 +904,21 @@ async def handle_instant_meet(
             return
 
         # ─────────────────────────────────────────────────────────
-        # Save Meeting
+        # Save Meeting (initial save without ts yet)
         # ─────────────────────────────────────────────────────────
 
         event_id = str(uuid.uuid4())
 
         record = MeetingRecord(
-    event_id=event_id,
-    user_id=user_id,
-    team_id=team_id,
-    title="Instant Meeting",
-    meet_link=meet_link,
-    start_time="now",
-    calendar_event_id=cal_event_id,
-    channel_id=channel_id,
-     )
+            event_id=event_id,
+            user_id=user_id,
+            team_id=team_id,
+            title="Instant Meeting",
+            meet_link=meet_link,
+            start_time="now",
+            calendar_event_id=cal_event_id,
+            channel_id=channel_id,
+        )
 
         db.add(record)
         db.commit()
@@ -930,16 +951,6 @@ async def handle_instant_meet(
                 "elements": [
                     {
                         "type": "button",
-                        "style": "primary",
-                        "text": {
-                            "type": "plain_text",
-                            "text": "📅 Schedule Later"
-                        },
-                        "action_id": "schedule_meeting",
-                        "value": action_value
-                    },
-                    {
-                        "type": "button",
                         "style": "danger",
                         "text": {
                             "type": "plain_text",
@@ -952,35 +963,23 @@ async def handle_instant_meet(
             }
         ]
 
-        await respond_in_channel(
-            response_url,
+        # ─────────────────────────────────────────────────────────
+        # Post to channel via chat.postMessage so we get a ts
+        # that we can delete later when the meeting is cancelled.
+        # We do NOT post to the bot DM — only to the real channel.
+        # ─────────────────────────────────────────────────────────
+
+        posted_channel, message_ts = await post_message_to_channel(
+            bot_token,
+            channel_id,
             f"Meeting ready: {meet_link}",
             blocks=blocks,
         )
 
-        # Open a bot DM to get a ts we can update later on cancel
-        dm = await slack_api(
-            bot_token,
-            "conversations.open",
-            {"users": user_id}
-        )
-        dm_channel = dm.get("channel", {}).get("id")
-
-        if dm_channel:
-            slack_response = await slack_api(
-                bot_token,
-                "chat.postMessage",
-                {
-                    "channel": dm_channel,
-                    "text": f"Meeting ready: {meet_link}",
-                    "blocks": blocks,
-                }
-            )
-            message_ts = slack_response.get("ts")
-            if message_ts:
-                record.slack_message_ts = message_ts
-                record.channel_id = dm_channel
-                db.commit()
+        if message_ts:
+            record.slack_message_ts = message_ts
+            record.channel_id = posted_channel or channel_id
+            db.commit()
 
     except Exception as e:
 
@@ -1146,13 +1145,11 @@ async def handle_scheduled_meeting(
     try:
 
         user_id = metadata["user_id"]
-
+        team_id = metadata["team_id"]
+        channel_id = metadata["channel_id"]
         response_url = metadata["response_url"]
 
-        organiser = get_db_user(
-            db,
-            user_id
-        )
+        organiser = get_db_user(db, user_id)
 
         if not organiser:
             return
@@ -1170,28 +1167,28 @@ async def handle_scheduled_meeting(
 
         event_id = str(uuid.uuid4())
 
-        db.add(
-            MeetingRecord(
-                event_id=event_id,
-                user_id=user_id,
-                team_id=metadata["team_id"],
-                title=title,
-                meet_link=meet_link,
-                start_time=f"{date} {time}",
-                calendar_event_id=calendar_event_id,
-            )
+        record = MeetingRecord(
+            event_id=event_id,
+            user_id=user_id,
+            team_id=team_id,
+            title=title,
+            meet_link=meet_link,
+            start_time=f"{date} {time}",
+            calendar_event_id=calendar_event_id,
+            channel_id=channel_id,
         )
 
+        db.add(record)
         db.commit()
 
         action_value = json.dumps({
             "event_id": event_id,
-            "user_id": metadata["user_id"],
-            "team_id": metadata["team_id"],
-            "channel_id": metadata["channel_id"],
+            "user_id": user_id,
+            "team_id": team_id,
+            "channel_id": channel_id,
             "uid": metadata.get("uid"),
             "uname": metadata.get("uname"),
-            "response_url": metadata["response_url"],
+            "response_url": response_url,
         })
 
         blocks = [
@@ -1235,41 +1232,24 @@ async def handle_scheduled_meeting(
             }
         ]
 
-        bot_token = get_token(metadata["team_id"])
+        bot_token = get_token(team_id)
 
-        await respond_in_channel(
-            metadata["response_url"],
+        # ─────────────────────────────────────────────────────────
+        # Post to channel via chat.postMessage so we get a ts
+        # that we can delete later when the meeting is cancelled.
+        # ─────────────────────────────────────────────────────────
+
+        posted_channel, message_ts = await post_message_to_channel(
+            bot_token,
+            channel_id,
             f"Meeting scheduled: {meet_link}",
             blocks=blocks,
         )
 
-        # Open a bot DM to get a ts we can update later on cancel
-        dm = await slack_api(
-            bot_token,
-            "conversations.open",
-            {"users": metadata["user_id"]}
-        )
-        dm_channel = dm.get("channel", {}).get("id")
-
-        if dm_channel:
-            slack_response = await slack_api(
-                bot_token,
-                "chat.postMessage",
-                {
-                    "channel": dm_channel,
-                    "text": f"Meeting scheduled: {meet_link}",
-                    "blocks": blocks,
-                }
-            )
-            message_ts = slack_response.get("ts")
-            if message_ts:
-                record = db.query(MeetingRecord).filter(
-                    MeetingRecord.event_id == event_id
-                ).first()
-                if record:
-                    record.slack_message_ts = message_ts
-                    record.channel_id = dm_channel
-                    db.commit()
+        if message_ts:
+            record.slack_message_ts = message_ts
+            record.channel_id = posted_channel or channel_id
+            db.commit()
 
     except Exception as e:
 
