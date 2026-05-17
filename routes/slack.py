@@ -129,6 +129,8 @@ async def respond_in_channel(
         response.status_code
     )
 
+    return response.json()
+
 
 # ─────────────────────────────────────────────────────────────────
 # Private Response
@@ -596,69 +598,88 @@ async def slack_actions(
                     value["user_id"],
                 )
 
-                reconnect_value = json.dumps({
-                    "session_id": str(uuid.uuid4()),
-                    "user_id": value["user_id"],
-                    "team_id": value["team_id"],
-                    "channel_id": value["channel_id"],
-                    "uid": value.get("uid"),
-                    "uname": value.get("uname"),
-                    "response_url": value["response_url"],
-                })
+                db = SessionLocal()
 
-                return JSONResponse({
-                    "replace_original": True,
-                    "blocks": [
+                record = db.query(MeetingRecord).filter(
+                    MeetingRecord.event_id == value["event_id"]
+                ).first()
+
+                if record:
+                    bot_token = get_token(value["team_id"])
+
+                    reconnect_value = json.dumps({
+                        "session_id": str(uuid.uuid4()),
+                        "user_id": value["user_id"],
+                        "team_id": value["team_id"],
+                        "channel_id": value["channel_id"],
+                        "uid": value.get("uid"),
+                        "uname": value.get("uname"),
+                        "response_url": value["response_url"],
+                    })
+
+                    await slack_api(
+                        bot_token,
+                        "chat.update",
                         {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": (
-                                    "❌ *Meeting Cancelled*\n\n"
-                                    "The meeting and calendar event "
-                                    "were cancelled successfully.\n\n"
-                                    "*What would you like to do next?*"
-                                )
-                            }
-                        },
-                        {
-                            "type": "actions",
-                            "elements": [
+                            "channel": record.channel_id,
+                            "ts": record.slack_message_ts,
+                            "text": "Meeting Cancelled",
+                            "blocks": [
                                 {
-                                    "type": "button",
-                                    "style": "primary",
+                                    "type": "section",
                                     "text": {
-                                        "type": "plain_text",
-                                        "text": "⚡ Connect Now"
-                                    },
-                                    "action_id": "connect_now",
-                                    "value": reconnect_value
+                                        "type": "mrkdwn",
+                                        "text": (
+                                            "❌ *Meeting Cancelled*\n\n"
+                                            "The meeting and calendar event "
+                                            "were cancelled successfully.\n\n"
+                                            "*What would you like to do next?*"
+                                        )
+                                    }
                                 },
                                 {
-                                    "type": "button",
-                                    "text": {
-                                        "type": "plain_text",
-                                        "text": "📅 Schedule Later"
-                                    },
-                                    "action_id": "schedule_meeting",
-                                    "value": reconnect_value
-                                },
-                                {
-                                    "type": "button",
-                                    "style": "danger",
-                                    "text": {
-                                        "type": "plain_text",
-                                        "text": "🛑 Stop"
-                                    },
-                                    "action_id": "stop_meeting_flow",
-                                    "value": json.dumps({
-                                        "session_id": str(uuid.uuid4())
-                                    })
+                                    "type": "actions",
+                                    "elements": [
+                                        {
+                                            "type": "button",
+                                            "style": "primary",
+                                            "text": {
+                                                "type": "plain_text",
+                                                "text": "⚡ Connect Now"
+                                            },
+                                            "action_id": "connect_now",
+                                            "value": reconnect_value
+                                        },
+                                        {
+                                            "type": "button",
+                                            "text": {
+                                                "type": "plain_text",
+                                                "text": "📅 Schedule Later"
+                                            },
+                                            "action_id": "schedule_meeting",
+                                            "value": reconnect_value
+                                        },
+                                        {
+                                            "type": "button",
+                                            "style": "danger",
+                                            "text": {
+                                                "type": "plain_text",
+                                                "text": "🛑 Stop"
+                                            },
+                                            "action_id": "stop_meeting_flow",
+                                            "value": json.dumps({
+                                                "session_id": str(uuid.uuid4())
+                                            })
+                                        }
+                                    ]
                                 }
                             ]
                         }
-                    ]
-                })
+                    )
+
+                db.close()
+
+                return JSONResponse({})
 
             # -----------------------------------------------------
             # STOP FLOW
@@ -1114,6 +1135,32 @@ async def handle_scheduled_meeting(
         if not meet_link:
             return
 
+        event_id = str(uuid.uuid4())
+
+        db.add(
+            MeetingRecord(
+                event_id=event_id,
+                user_id=user_id,
+                team_id=metadata["team_id"],
+                title=title,
+                meet_link=meet_link,
+                start_time=f"{date} {time}",
+                calendar_event_id=calendar_event_id,
+            )
+        )
+
+        db.commit()
+
+        action_value = json.dumps({
+            "event_id": event_id,
+            "user_id": metadata["user_id"],
+            "team_id": metadata["team_id"],
+            "channel_id": metadata["channel_id"],
+            "uid": metadata.get("uid"),
+            "uname": metadata.get("uname"),
+            "response_url": metadata["response_url"],
+        })
+
         blocks = [
 
             {
@@ -1130,14 +1177,48 @@ async def handle_scheduled_meeting(
                         f"📞 {meet_link}"
                     )
                 }
+            },
+
+            {
+                "type": "actions",
+
+                "elements": [
+
+                    {
+                        "type": "button",
+
+                        "style": "danger",
+
+                        "text": {
+                            "type": "plain_text",
+                            "text": "🗑 Cancel Meeting"
+                        },
+
+                        "action_id": "cancel_meeting",
+
+                        "value": action_value
+                    }
+                ]
             }
         ]
 
-        await respond_in_channel(
+        slack_response = await respond_in_channel(
             response_url,
             f"Meeting scheduled: {meet_link}",
             blocks
         )
+
+        message_ts = slack_response.get("ts")
+
+        if message_ts:
+            record = db.query(MeetingRecord).filter(
+                MeetingRecord.event_id == event_id
+            ).first()
+
+            if record:
+                record.slack_message_ts = message_ts
+                record.channel_id = metadata["channel_id"]
+                db.commit()
 
     except Exception as e:
 
