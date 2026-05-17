@@ -22,6 +22,8 @@ from models.user_token import (
 
 from services.google import (
     create_meeting,
+    cancel_calendar_event,
+    create_scheduled_meeting,
 )
 
 router = APIRouter()
@@ -333,8 +335,7 @@ async def meet(
                     "text": {
                         "type": "mrkdwn",
                         "text": (
-                            f"🤝 Meeting with "
-                            f"<@{uid}>"
+                            f"🤝 Meeting with <@{uid}>"
                         )
                     }
                 },
@@ -374,9 +375,16 @@ async def meet(
                                 "text": "📅 Schedule Later"
                             },
 
-                            "action_id": "schedule_later",
+                            "action_id": "schedule_meeting",
 
-                            "value": "todo"
+                            "value": json.dumps({
+                                "user_id": user_id,
+                                "team_id": team_id,
+                                "channel_id": channel_id,
+                                "uid": uid,
+                                "uname": uname,
+                                "response_url": response_url,
+                            })
                         }
                     ]
                 }
@@ -397,11 +405,67 @@ async def meet(
 
 
 # ─────────────────────────────────────────────────────────────────
+# Cancel Meeting Handler
+# ─────────────────────────────────────────────────────────────────
+
+async def handle_cancel_meeting(
+    event_id: str,
+    user_id: str,
+):
+
+    db = SessionLocal()
+
+    try:
+
+        record = db.query(
+            MeetingRecord
+        ).filter(
+            MeetingRecord.event_id == event_id
+        ).first()
+
+        if not record:
+            return
+
+        organiser = get_db_user(
+            db,
+            user_id
+        )
+
+        if (
+            organiser
+            and record.calendar_event_id
+        ):
+
+            cancel_calendar_event(
+                organiser,
+                record.calendar_event_id
+            )
+
+        db.delete(record)
+
+        db.commit()
+
+        print(
+            f"✅ Meeting cancelled: {event_id}"
+        )
+
+    except Exception as e:
+
+        print(
+            "🔥 Cancel Meeting ERROR:",
+            str(e)
+        )
+
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────
 # Actions Route
 # ─────────────────────────────────────────────────────────────────
 
 @router.post("/actions")
-async def actions(
+async def slack_actions(
     request: Request,
     background_tasks: BackgroundTasks
 ):
@@ -414,80 +478,137 @@ async def actions(
             form.get("payload", "{}")
         )
 
-        actions_list = payload.get(
-            "actions",
-            []
-        )
+        payload_type = payload.get("type")
 
-        if not actions_list:
-            return JSONResponse({})
+        # =========================================================
+        # BUTTON ACTIONS
+        # =========================================================
 
-        action = actions_list[0]
+        if payload_type == "block_actions":
 
-        action_id = action.get(
-            "action_id"
-        )
+            action = payload["actions"][0]
 
-        # ─────────────────────────────────────────────────────────
-        # Connect Now
-        # ─────────────────────────────────────────────────────────
-
-        if action_id == "connect_now":
-
-            value = json.loads(
-                action.get("value")
+            action_id = action.get(
+                "action_id"
             )
 
-            background_tasks.add_task(
-                handle_instant_meet,
-                value["user_id"],
-                value["team_id"],
-                value["channel_id"],
-                value["uid"],
-                value["uname"],
-                value["response_url"],
-            )
+            # -----------------------------------------------------
+            # CONNECT NOW
+            # -----------------------------------------------------
 
-            return JSONResponse({})
+            if action_id == "connect_now":
 
-        # ─────────────────────────────────────────────────────────
-        # Cancel Meeting
-        # ─────────────────────────────────────────────────────────
+                value = json.loads(
+                    action.get("value")
+                )
 
-        if action_id == "cancel_meeting":
+                background_tasks.add_task(
+                    handle_instant_meet,
+                    value["user_id"],
+                    value["team_id"],
+                    value["channel_id"],
+                    value["uid"],
+                    value["uname"],
+                    value["response_url"],
+                )
 
-            value = json.loads(
-                action.get("value")
-            )
+                return JSONResponse({})
 
-            event_id = value.get(
-                "event_id"
-            )
+            # -----------------------------------------------------
+            # SCHEDULE MEETING
+            # -----------------------------------------------------
 
-            db = SessionLocal()
+            if action_id == "schedule_meeting":
 
-            try:
+                value = json.loads(
+                    action.get("value")
+                )
 
-                record = db.query(
-                    MeetingRecord
-                ).filter(
-                    MeetingRecord.event_id == event_id
-                ).first()
+                await open_schedule_modal(
+                    trigger_id=payload["trigger_id"],
+                    metadata=value,
+                    team_id=value["team_id"],
+                )
 
-                if record:
+                return JSONResponse({})
 
-                    db.delete(record)
-                    db.commit()
+            # -----------------------------------------------------
+            # CANCEL MEETING
+            # -----------------------------------------------------
 
-            finally:
-                db.close()
+            if action_id == "cancel_meeting":
 
-            return JSONResponse({
+                value = json.loads(
+                    action.get("value")
+                )
 
-                "replace_original": True,
+                background_tasks.add_task(
+                    handle_cancel_meeting,
+                    value["event_id"],
+                    value["user_id"],
+                )
 
-                "text": "❌ Meeting cancelled"
-            })
+                return JSONResponse({
+
+                    "replace_original": True,
+
+                    "text": (
+                        "❌ Meeting cancelled successfully"
+                    )
+                })
+
+        # =========================================================
+        # MODAL SUBMIT
+        # =========================================================
+
+        if payload_type == "view_submission":
+
+            view = payload["view"]
+
+            if (
+                view["callback_id"]
+                == "schedule_modal"
+            ):
+
+                metadata = json.loads(
+                    view["private_metadata"]
+                )
+
+                values = view["state"]["values"]
+
+                title = values[
+                    "title_block"
+                ]["title_input"]["value"]
+
+                date = values[
+                    "date_block"
+                ]["date_input"]["selected_date"]
+
+                time = values[
+                    "time_block"
+                ]["time_input"]["selected_time"]
+
+                duration = int(
+                    values[
+                        "duration_block"
+                    ]["duration_input"][
+                        "selected_option"
+                    ]["value"]
+                )
+
+                background_tasks.add_task(
+                    handle_scheduled_meeting,
+                    metadata,
+                    title,
+                    date,
+                    time,
+                    duration,
+                )
+
+                return JSONResponse({
+
+                    "response_action": "clear"
+                })
 
         return JSONResponse({})
 
@@ -637,19 +758,25 @@ async def handle_instant_meet(
 
         db.commit()
 
-        cancel_value = json.dumps({
+        action_value = json.dumps({
+
             "event_id": event_id,
             "user_id": user_id,
             "team_id": team_id,
             "channel_id": channel_id,
+            "uid": uid,
+            "uname": uname,
+            "response_url": response_url,
         })
 
         blocks = [
 
             {
                 "type": "section",
+
                 "text": {
                     "type": "mrkdwn",
+
                     "text": (
                         f"🚀 *Meeting Ready!*\n\n"
                         f"👤 Started by <@{user_id}>\n"
@@ -661,10 +788,27 @@ async def handle_instant_meet(
 
             {
                 "type": "actions",
+
                 "elements": [
 
                     {
                         "type": "button",
+
+                        "style": "primary",
+
+                        "text": {
+                            "type": "plain_text",
+                            "text": "📅 Schedule Later"
+                        },
+
+                        "action_id": "schedule_meeting",
+
+                        "value": action_value
+                    },
+
+                    {
+                        "type": "button",
+
                         "style": "danger",
 
                         "text": {
@@ -674,7 +818,7 @@ async def handle_instant_meet(
 
                         "action_id": "cancel_meeting",
 
-                        "value": cancel_value
+                        "value": action_value
                     }
                 ]
             }
@@ -690,6 +834,217 @@ async def handle_instant_meet(
 
         print(
             "🔥 handle_instant_meet ERROR:",
+            str(e)
+        )
+
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Schedule Modal
+# ─────────────────────────────────────────────────────────────────
+
+async def open_schedule_modal(
+    trigger_id: str,
+    metadata: dict,
+    team_id: str,
+):
+
+    bot_token = get_token(team_id)
+
+    modal = {
+
+        "trigger_id": trigger_id,
+
+        "view": {
+
+            "type": "modal",
+
+            "callback_id": "schedule_modal",
+
+            "private_metadata": json.dumps(metadata),
+
+            "title": {
+                "type": "plain_text",
+                "text": "Schedule Meeting"
+            },
+
+            "submit": {
+                "type": "plain_text",
+                "text": "Create"
+            },
+
+            "blocks": [
+
+                {
+                    "type": "input",
+
+                    "block_id": "title_block",
+
+                    "label": {
+                        "type": "plain_text",
+                        "text": "Meeting Title"
+                    },
+
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "title_input"
+                    }
+                },
+
+                {
+                    "type": "input",
+
+                    "block_id": "date_block",
+
+                    "label": {
+                        "type": "plain_text",
+                        "text": "Date"
+                    },
+
+                    "element": {
+                        "type": "datepicker",
+                        "action_id": "date_input"
+                    }
+                },
+
+                {
+                    "type": "input",
+
+                    "block_id": "time_block",
+
+                    "label": {
+                        "type": "plain_text",
+                        "text": "Time"
+                    },
+
+                    "element": {
+                        "type": "timepicker",
+                        "action_id": "time_input"
+                    }
+                },
+
+                {
+                    "type": "input",
+
+                    "block_id": "duration_block",
+
+                    "label": {
+                        "type": "plain_text",
+                        "text": "Duration"
+                    },
+
+                    "element": {
+
+                        "type": "static_select",
+
+                        "action_id": "duration_input",
+
+                        "options": [
+
+                            {
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "30 Minutes"
+                                },
+                                "value": "30"
+                            },
+
+                            {
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "1 Hour"
+                                },
+                                "value": "60"
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    }
+
+    result = await slack_api(
+        bot_token,
+        "views.open",
+        modal
+    )
+
+    print(
+        "DEBUG modal:",
+        result
+    )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Scheduled Meeting
+# ─────────────────────────────────────────────────────────────────
+
+async def handle_scheduled_meeting(
+    metadata: dict,
+    title: str,
+    date: str,
+    time: str,
+    duration: int,
+):
+
+    db = SessionLocal()
+
+    try:
+
+        user_id = metadata["user_id"]
+
+        response_url = metadata["response_url"]
+
+        organiser = get_db_user(
+            db,
+            user_id
+        )
+
+        if not organiser:
+            return
+
+        meet_link, calendar_event_id = create_scheduled_meeting(
+            organiser,
+            title,
+            date,
+            time,
+            duration,
+        )
+
+        if not meet_link:
+            return
+
+        blocks = [
+
+            {
+                "type": "section",
+
+                "text": {
+                    "type": "mrkdwn",
+
+                    "text": (
+                        f"📅 *Meeting Scheduled*\n\n"
+                        f"📌 {title}\n"
+                        f"🗓 {date}\n"
+                        f"⏰ {time}\n"
+                        f"📞 {meet_link}"
+                    )
+                }
+            }
+        ]
+
+        await respond_in_channel(
+            response_url,
+            f"Meeting scheduled: {meet_link}",
+            blocks
+        )
+
+    except Exception as e:
+
+        print(
+            "🔥 Scheduled Meeting ERROR:",
             str(e)
         )
 
