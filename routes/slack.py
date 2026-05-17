@@ -99,6 +99,45 @@ async def slack_api(
 
 
 # ─────────────────────────────────────────────────────────────────
+# Post Message (DM-safe)
+# ─────────────────────────────────────────────────────────────────
+
+async def post_message_to_user(
+    bot_token: str,
+    user_id: str,
+    channel_id: str,
+    text: str,
+    blocks: list = None,
+):
+    """
+    Try posting to channel_id first.
+    If it fails with channel_not_found, open a DM with the user and retry.
+    """
+    payload = {
+        "channel": channel_id,
+        "text": text,
+    }
+    if blocks:
+        payload["blocks"] = blocks
+
+    result = await slack_api(bot_token, "chat.postMessage", payload)
+
+    if not result.get("ok") and result.get("error") == "channel_not_found":
+        # Open a DM with the user and retry
+        dm = await slack_api(
+            bot_token,
+            "conversations.open",
+            {"users": user_id}
+        )
+        dm_channel = dm.get("channel", {}).get("id")
+        if dm_channel:
+            payload["channel"] = dm_channel
+            result = await slack_api(bot_token, "chat.postMessage", payload)
+
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────
 # Public Response
 # ─────────────────────────────────────────────────────────────────
 
@@ -563,9 +602,7 @@ async def slack_actions(
             # CONNECT NOW
             # -----------------------------------------------------
             if action_id == "connect_now":
-                if action_id == "cancel_meeting":
-
-                 _used_sessions.add(session_id)
+                _used_sessions.add(session_id)
 
                 background_tasks.add_task(
                     handle_instant_meet,
@@ -583,9 +620,7 @@ async def slack_actions(
             # SCHEDULE MEETING
             # -----------------------------------------------------
             if action_id == "schedule_meeting":
-                if action_id == "cancel_meeting":
-
-                 _used_sessions.add(session_id)
+                _used_sessions.add(session_id)
 
                 await open_schedule_modal(
                     trigger_id=payload["trigger_id"],
@@ -949,20 +984,21 @@ async def handle_instant_meet(
             }
         ]
 
-        slack_response = await slack_api(
-    bot_token,
-    "chat.postMessage",
-    {
-        "channel": channel_id,
-        "text": f"Meeting ready: {meet_link}",
-        "blocks": blocks
-    }
-)
+        slack_response = await post_message_to_user(
+            bot_token,
+            user_id,
+            channel_id,
+            f"Meeting ready: {meet_link}",
+            blocks=blocks,
+        )
 
         message_ts = slack_response.get("ts")
+        resolved_channel = slack_response.get("channel")
 
         if message_ts:
            record.slack_message_ts = message_ts
+           if resolved_channel:
+               record.channel_id = resolved_channel
            db.commit()
 
     except Exception as e:
@@ -1220,17 +1256,16 @@ async def handle_scheduled_meeting(
 
         bot_token = get_token(metadata["team_id"])
 
-        slack_response = await slack_api(
-    bot_token,
-    "chat.postMessage",
-    {
-        "channel": metadata["channel_id"],
-        "text": f"Meeting scheduled: {meet_link}",
-        "blocks": blocks
-    }
-)
+        slack_response = await post_message_to_user(
+            bot_token,
+            metadata["user_id"],
+            metadata["channel_id"],
+            f"Meeting scheduled: {meet_link}",
+            blocks=blocks,
+        )
 
         message_ts = slack_response.get("ts")
+        resolved_channel = slack_response.get("channel")
 
         if message_ts:
             record = db.query(MeetingRecord).filter(
@@ -1240,6 +1275,8 @@ async def handle_scheduled_meeting(
             if record:
                 record.slack_message_ts = message_ts
                 record.channel_id = metadata["channel_id"]
+                if resolved_channel:
+                    record.channel_id = resolved_channel
                 db.commit()
 
     except Exception as e:
