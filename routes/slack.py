@@ -469,9 +469,7 @@ async def slack_actions(
     request: Request,
     background_tasks: BackgroundTasks
 ):
-
     try:
-
         form = await request.form()
 
         payload = json.loads(
@@ -485,19 +483,13 @@ async def slack_actions(
         # =========================================================
 
         if payload_type == "block_actions":
-
             action = payload["actions"][0]
-
-            action_id = action.get(
-                "action_id"
-            )
+            action_id = action.get("action_id")
 
             # -----------------------------------------------------
             # CONNECT NOW
             # -----------------------------------------------------
-
             if action_id == "connect_now":
-
                 value = json.loads(
                     action.get("value")
                 )
@@ -517,9 +509,7 @@ async def slack_actions(
             # -----------------------------------------------------
             # SCHEDULE MEETING
             # -----------------------------------------------------
-
             if action_id == "schedule_meeting":
-
                 value = json.loads(
                     action.get("value")
                 )
@@ -535,9 +525,7 @@ async def slack_actions(
             # -----------------------------------------------------
             # CANCEL MEETING
             # -----------------------------------------------------
-
             if action_id == "cancel_meeting":
-
                 value = json.loads(
                     action.get("value")
                 )
@@ -548,28 +536,84 @@ async def slack_actions(
                     value["user_id"],
                 )
 
+                stop_value = json.dumps({
+                    "stopped": True
+                })
+
                 return JSONResponse({
-
                     "replace_original": True,
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": (
+                                    "❌ *Meeting Cancelled*\n\n"
+                                    "The Google Meet link and calendar "
+                                    "event were removed successfully.\n\n"
+                                    "Would you like to schedule another "
+                                    "meeting?"
+                                )
+                            }
+                        },
+                        {
+                            "type": "actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "style": "primary",
+                                    "text": {
+                                        "type": "plain_text",
+                                        "text": "📅 Schedule Meeting"
+                                    },
+                                    "action_id": "schedule_meeting",
+                                    "value": json.dumps({
+                                        "user_id": value["user_id"],
+                                        "team_id": value["team_id"],
+                                        "channel_id": value["channel_id"],
+                                        "uid": value.get("uid"),
+                                        "uname": value.get("uname"),
+                                        "response_url": value["response_url"],
+                                    })
+                                },
+                                {
+                                    "type": "button",
+                                    "style": "danger",
+                                    "text": {
+                                        "type": "plain_text",
+                                        "text": "🛑 Stop"
+                                    },
+                                    "action_id": "stop_meeting_flow",
+                                    "value": stop_value
+                                }
+                            ]
+                        }
+                    ]
+                })
 
-                    "text": (
-                        "❌ Meeting cancelled successfully"
-                    )
+            # -----------------------------------------------------
+            # STOP FLOW
+            # -----------------------------------------------------
+            if action_id == "stop_meeting_flow":
+                return JSONResponse({
+                    "replace_original": True,
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "✅ Meeting flow closed."
+                            }
+                        }
+                    ]
                 })
 
         # =========================================================
         # MODAL SUBMIT
         # =========================================================
-
         if payload_type == "view_submission":
-
-            view = payload["view"]
-
-            if (
-                view["callback_id"]
-                == "schedule_modal"
-            ):
-
+            view = payload.get("view", {})
+            if view.get("callback_id") == "schedule_modal":
                 metadata = json.loads(
                     view["private_metadata"]
                 )
@@ -606,20 +650,21 @@ async def slack_actions(
                 )
 
                 return JSONResponse({
-
                     "response_action": "clear"
                 })
 
         return JSONResponse({})
 
     except Exception as e:
-
         print(
             "🔥 /actions ERROR:",
             str(e)
         )
 
-        return JSONResponse({})
+        return JSONResponse({
+            "response_type": "ephemeral",
+            "text": "Something went wrong."
+        })
 
 
 # ─────────────────────────────────────────────────────────────────
