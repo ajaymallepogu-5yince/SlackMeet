@@ -187,19 +187,23 @@ async def post_meeting_message(
 # ─────────────────────────────────────────────────────────────────
 
 async def replace_meeting_message_with_cancelled(response_url: str):
-    """Overwrite the meeting card in-place so buttons disappear."""
+    """Overwrite the meeting card in-place — removes buttons and meet link."""
     if not response_url:
         return
 
     payload = {
         "replace_original": "true",
-        "text": "🗑 Meeting cancelled.",
+        "text": "❌ Meeting Cancelled",
         "blocks": [
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "🗑 *Meeting cancelled.* Use `/meet @user` to start a new one."
+                    "text": (
+                        "❌ *Meeting Cancelled*\n\n"
+                        "The meeting and calendar event were cancelled successfully.\n\n"
+                        "Use `/meet @user` to start a new meeting."
+                    )
                 }
             }
         ]
@@ -688,28 +692,9 @@ async def slack_actions(
                 if not event_id:
                     return JSONResponse({})
 
-                # Post "Meeting Cancelled" notice to the channel
-                # (the meeting message itself is deleted inside handle_cancel_meeting)
-                await respond_in_channel(
-                    value["response_url"],
-                    "❌ Meeting Cancelled",
-                    blocks=[
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": (
-                                    "❌ *Meeting Cancelled*\n\n"
-                                    "The meeting and calendar event "
-                                    "were cancelled successfully.\n\n"
-                                    "Use `/meet @user` to start a new meeting."
-                                )
-                            }
-                        }
-                    ]
-                )
-
-                # Delete meeting message + cancel calendar in background
+                # handle_cancel_meeting will replace the meeting card
+                # in-place with a cancelled message via replace_original.
+                # No separate message needed here.
                 background_tasks.add_task(
                     handle_cancel_meeting,
                     event_id,
