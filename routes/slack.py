@@ -99,45 +99,6 @@ async def slack_api(
 
 
 # ─────────────────────────────────────────────────────────────────
-# Post Message (DM-safe)
-# ─────────────────────────────────────────────────────────────────
-
-async def post_message_to_user(
-    bot_token: str,
-    user_id: str,
-    channel_id: str,
-    text: str,
-    blocks: list = None,
-):
-    """
-    Try posting to channel_id first.
-    If it fails with channel_not_found, open a DM with the user and retry.
-    """
-    payload = {
-        "channel": channel_id,
-        "text": text,
-    }
-    if blocks:
-        payload["blocks"] = blocks
-
-    result = await slack_api(bot_token, "chat.postMessage", payload)
-
-    if not result.get("ok") and result.get("error") == "channel_not_found":
-        # Open a DM with the user and retry
-        dm = await slack_api(
-            bot_token,
-            "conversations.open",
-            {"users": user_id}
-        )
-        dm_channel = dm.get("channel", {}).get("id")
-        if dm_channel:
-            payload["channel"] = dm_channel
-            result = await slack_api(bot_token, "chat.postMessage", payload)
-
-    return result
-
-
-# ─────────────────────────────────────────────────────────────────
 # Public Response
 # ─────────────────────────────────────────────────────────────────
 
@@ -984,22 +945,35 @@ async def handle_instant_meet(
             }
         ]
 
-        slack_response = await post_message_to_user(
-            bot_token,
-            user_id,
-            channel_id,
+        await respond_in_channel(
+            response_url,
             f"Meeting ready: {meet_link}",
             blocks=blocks,
         )
 
-        message_ts = slack_response.get("ts")
-        resolved_channel = slack_response.get("channel")
+        # Open a bot DM to get a ts we can update later on cancel
+        dm = await slack_api(
+            bot_token,
+            "conversations.open",
+            {"users": user_id}
+        )
+        dm_channel = dm.get("channel", {}).get("id")
 
-        if message_ts:
-           record.slack_message_ts = message_ts
-           if resolved_channel:
-               record.channel_id = resolved_channel
-           db.commit()
+        if dm_channel:
+            slack_response = await slack_api(
+                bot_token,
+                "chat.postMessage",
+                {
+                    "channel": dm_channel,
+                    "text": f"Meeting ready: {meet_link}",
+                    "blocks": blocks,
+                }
+            )
+            message_ts = slack_response.get("ts")
+            if message_ts:
+                record.slack_message_ts = message_ts
+                record.channel_id = dm_channel
+                db.commit()
 
     except Exception as e:
 
@@ -1256,28 +1230,39 @@ async def handle_scheduled_meeting(
 
         bot_token = get_token(metadata["team_id"])
 
-        slack_response = await post_message_to_user(
-            bot_token,
-            metadata["user_id"],
-            metadata["channel_id"],
+        await respond_in_channel(
+            metadata["response_url"],
             f"Meeting scheduled: {meet_link}",
             blocks=blocks,
         )
 
-        message_ts = slack_response.get("ts")
-        resolved_channel = slack_response.get("channel")
+        # Open a bot DM to get a ts we can update later on cancel
+        dm = await slack_api(
+            bot_token,
+            "conversations.open",
+            {"users": metadata["user_id"]}
+        )
+        dm_channel = dm.get("channel", {}).get("id")
 
-        if message_ts:
-            record = db.query(MeetingRecord).filter(
-                MeetingRecord.event_id == event_id
-            ).first()
-
-            if record:
-                record.slack_message_ts = message_ts
-                record.channel_id = metadata["channel_id"]
-                if resolved_channel:
-                    record.channel_id = resolved_channel
-                db.commit()
+        if dm_channel:
+            slack_response = await slack_api(
+                bot_token,
+                "chat.postMessage",
+                {
+                    "channel": dm_channel,
+                    "text": f"Meeting scheduled: {meet_link}",
+                    "blocks": blocks,
+                }
+            )
+            message_ts = slack_response.get("ts")
+            if message_ts:
+                record = db.query(MeetingRecord).filter(
+                    MeetingRecord.event_id == event_id
+                ).first()
+                if record:
+                    record.slack_message_ts = message_ts
+                    record.channel_id = dm_channel
+                    db.commit()
 
     except Exception as e:
 
