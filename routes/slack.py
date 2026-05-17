@@ -129,7 +129,10 @@ async def respond_in_channel(
         response.status_code
     )
 
-    return response.json()
+    try:
+        return response.json()
+    except Exception:
+        return {}
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -560,7 +563,9 @@ async def slack_actions(
             # CONNECT NOW
             # -----------------------------------------------------
             if action_id == "connect_now":
-                _used_sessions.add(session_id)
+                if action_id == "cancel_meeting":
+
+                 _used_sessions.add(session_id)
 
                 background_tasks.add_task(
                     handle_instant_meet,
@@ -578,7 +583,9 @@ async def slack_actions(
             # SCHEDULE MEETING
             # -----------------------------------------------------
             if action_id == "schedule_meeting":
-                _used_sessions.add(session_id)
+                if action_id == "cancel_meeting":
+
+                 _used_sessions.add(session_id)
 
                 await open_schedule_modal(
                     trigger_id=payload["trigger_id"],
@@ -942,11 +949,15 @@ async def handle_instant_meet(
             }
         ]
 
-        slack_response = await respond_in_channel(
-            response_url,
-             f"Meeting ready: {meet_link}",
-             blocks
-            )
+        slack_response = await slack_api(
+    bot_token,
+    "chat.postMessage",
+    {
+        "channel": channel_id,
+        "text": f"Meeting ready: {meet_link}",
+        "blocks": blocks
+    }
+)
 
         message_ts = slack_response.get("ts")
 
@@ -1207,11 +1218,17 @@ async def handle_scheduled_meeting(
             }
         ]
 
-        slack_response = await respond_in_channel(
-            response_url,
-            f"Meeting scheduled: {meet_link}",
-            blocks
-        )
+        bot_token = get_token(metadata["team_id"])
+
+        slack_response = await slack_api(
+    bot_token,
+    "chat.postMessage",
+    {
+        "channel": metadata["channel_id"],
+        "text": f"Meeting scheduled: {meet_link}",
+        "blocks": blocks
+    }
+)
 
         message_ts = slack_response.get("ts")
 
