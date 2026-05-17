@@ -168,58 +168,24 @@ async def respond_to_user(
 
 
 # ─────────────────────────────────────────────────────────────────
-# Post message to channel and return (channel_id, ts)
-# Use this instead of respond_in_channel when we need to delete later
+# Delete original message posted via response_url
+# POST {"delete_original": true} to the stored response_url
 # ─────────────────────────────────────────────────────────────────
 
-async def post_message_to_channel(
-    bot_token: str,
-    channel_id: str,
-    text: str,
-    blocks: list = None,
-) -> tuple[str | None, str | None]:
-    """Post a message via chat.postMessage and return (channel_id, ts)."""
-
-    payload = {
-        "channel": channel_id,
-        "text": text,
-    }
-
-    if blocks:
-        payload["blocks"] = blocks
-
-    result = await slack_api(
-        bot_token,
-        "chat.postMessage",
-        payload,
-    )
-
-    ts = result.get("ts")
-    ch = result.get("channel")
-
-    return ch, ts
-
-
-# ─────────────────────────────────────────────────────────────────
-# Delete a Slack message
-# ─────────────────────────────────────────────────────────────────
-
-async def delete_slack_message(
-    bot_token: str,
-    channel_id: str,
-    message_ts: str,
-):
-    if not channel_id or not message_ts:
+async def delete_original_message(response_url: str):
+    """Delete the message that was originally posted via this response_url."""
+    if not response_url:
         return
 
-    await slack_api(
-        bot_token,
-        "chat.delete",
-        {
-            "channel": channel_id,
-            "ts": message_ts,
-        }
-    )
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                response_url,
+                json={"delete_original": "true"},
+                timeout=20,
+            )
+    except Exception as e:
+        print(f"🔥 delete_original_message ERROR: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -539,15 +505,10 @@ async def handle_cancel_meeting(
         if not record:
             return
 
-        bot_token = get_token(team_id)
-
         # Delete the Slack message that had the meeting link + buttons
-        if record.channel_id and record.slack_message_ts:
-            await delete_slack_message(
-                bot_token,
-                record.channel_id,
-                record.slack_message_ts,
-            )
+        # by POSTing delete_original to the stored response_url
+        if record.response_url:
+            await delete_original_message(record.response_url)
 
         # Cancel the Google Calendar event
         organiser = get_db_user(db, user_id)
@@ -964,22 +925,20 @@ async def handle_instant_meet(
         ]
 
         # ─────────────────────────────────────────────────────────
-        # Post to channel via chat.postMessage so we get a ts
-        # that we can delete later when the meeting is cancelled.
-        # We do NOT post to the bot DM — only to the real channel.
+        # Post to channel via response_url (always works regardless
+        # of channel type). Save response_url to record so we can
+        # delete this message later via delete_original.
         # ─────────────────────────────────────────────────────────
 
-        posted_channel, message_ts = await post_message_to_channel(
-            bot_token,
-            channel_id,
+        await respond_in_channel(
+            response_url,
             f"Meeting ready: {meet_link}",
             blocks=blocks,
         )
 
-        if message_ts:
-            record.slack_message_ts = message_ts
-            record.channel_id = posted_channel or channel_id
-            db.commit()
+        # Save response_url so cancel can delete this message
+        record.response_url = response_url
+        db.commit()
 
     except Exception as e:
 
@@ -1235,21 +1194,18 @@ async def handle_scheduled_meeting(
         bot_token = get_token(team_id)
 
         # ─────────────────────────────────────────────────────────
-        # Post to channel via chat.postMessage so we get a ts
-        # that we can delete later when the meeting is cancelled.
+        # Post via response_url (always works). Save response_url
+        # to record so cancel can delete this message later.
         # ─────────────────────────────────────────────────────────
 
-        posted_channel, message_ts = await post_message_to_channel(
-            bot_token,
-            channel_id,
+        await respond_in_channel(
+            response_url,
             f"Meeting scheduled: {meet_link}",
             blocks=blocks,
         )
 
-        if message_ts:
-            record.slack_message_ts = message_ts
-            record.channel_id = posted_channel or channel_id
-            db.commit()
+        record.response_url = response_url
+        db.commit()
 
     except Exception as e:
 
