@@ -168,24 +168,52 @@ async def respond_to_user(
 
 
 # ─────────────────────────────────────────────────────────────────
-# Delete original message posted via response_url
-# POST {"delete_original": true} to the stored response_url
+# Post meeting card via response_url → stays in the same channel
+# where the user typed /meet. Returns nothing (response_url has no ts).
 # ─────────────────────────────────────────────────────────────────
 
-async def delete_original_message(response_url: str):
-    """Delete the message that was originally posted via this response_url."""
+async def post_meeting_message(
+    response_url: str,
+    text: str,
+    blocks: list,
+):
+    """Post the meeting card in-channel via response_url."""
+    await respond_in_channel(response_url, text, blocks=blocks)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Replace the meeting card with a "cancelled" notice.
+# We can't delete response_url messages but we can replace them.
+# ─────────────────────────────────────────────────────────────────
+
+async def replace_meeting_message_with_cancelled(response_url: str):
+    """Overwrite the meeting card in-place so buttons disappear."""
     if not response_url:
         return
+
+    payload = {
+        "replace_original": "true",
+        "text": "🗑 Meeting cancelled.",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "🗑 *Meeting cancelled.* Use `/meet @user` to start a new one."
+                }
+            }
+        ]
+    }
 
     try:
         async with httpx.AsyncClient() as client:
             await client.post(
                 response_url,
-                json={"delete_original": "true"},
+                json=payload,
                 timeout=20,
             )
     except Exception as e:
-        print(f"🔥 delete_original_message ERROR: {e}")
+        print(f"🔥 replace_meeting_message ERROR: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -505,10 +533,9 @@ async def handle_cancel_meeting(
         if not record:
             return
 
-        # Delete the Slack message that had the meeting link + buttons
-        # by POSTing delete_original to the stored response_url
+        # Replace the meeting card in-place (remove buttons, show cancelled)
         if record.response_url:
-            await delete_original_message(record.response_url)
+            await replace_meeting_message_with_cancelled(record.response_url)
 
         # Cancel the Google Calendar event
         organiser = get_db_user(db, user_id)
@@ -925,18 +952,16 @@ async def handle_instant_meet(
         ]
 
         # ─────────────────────────────────────────────────────────
-        # Post to channel via response_url (always works regardless
-        # of channel type). Save response_url to record so we can
-        # delete this message later via delete_original.
+        # Post meeting card in the same channel where /meet was used.
+        # Save response_url so cancel can replace this message later.
         # ─────────────────────────────────────────────────────────
 
-        await respond_in_channel(
+        await post_meeting_message(
             response_url,
             f"Meeting ready: {meet_link}",
-            blocks=blocks,
+            blocks,
         )
 
-        # Save response_url so cancel can delete this message
         record.response_url = response_url
         db.commit()
 
@@ -1194,14 +1219,14 @@ async def handle_scheduled_meeting(
         bot_token = get_token(team_id)
 
         # ─────────────────────────────────────────────────────────
-        # Post via response_url (always works). Save response_url
-        # to record so cancel can delete this message later.
+        # Post meeting card in the same channel where /meet was used.
+        # Save response_url so cancel can replace this message later.
         # ─────────────────────────────────────────────────────────
 
-        await respond_in_channel(
+        await post_meeting_message(
             response_url,
             f"Meeting scheduled: {meet_link}",
-            blocks=blocks,
+            blocks,
         )
 
         record.response_url = response_url
