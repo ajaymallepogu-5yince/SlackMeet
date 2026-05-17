@@ -592,11 +592,6 @@ async def slack_actions(
             # CANCEL MEETING
             # -----------------------------------------------------
             if action_id == "cancel_meeting":
-                background_tasks.add_task(
-                    handle_cancel_meeting,
-                    value["event_id"],
-                    value["user_id"],
-                )
 
                 db = SessionLocal()
 
@@ -676,7 +671,11 @@ async def slack_actions(
                             ]
                         }
                     )
-
+                    background_tasks.add_task(
+                    handle_cancel_meeting,
+                    value["event_id"],
+                    value["user_id"],
+                )
                 db.close()
 
                 return JSONResponse({})
@@ -879,18 +878,18 @@ async def handle_instant_meet(
 
         event_id = str(uuid.uuid4())
 
-        db.add(
-            MeetingRecord(
-                event_id=event_id,
-                user_id=user_id,
-                team_id=team_id,
-                title="Instant Meeting",
-                meet_link=meet_link,
-                start_time="now",
-                calendar_event_id=cal_event_id,
-            )
-        )
+        record = MeetingRecord(
+    event_id=event_id,
+    user_id=user_id,
+    team_id=team_id,
+    title="Instant Meeting",
+    meet_link=meet_link,
+    start_time="now",
+    calendar_event_id=cal_event_id,
+    channel_id=channel_id,
+     )
 
+        db.add(record)
         db.commit()
 
         action_value = json.dumps({
@@ -943,11 +942,17 @@ async def handle_instant_meet(
             }
         ]
 
-        await respond_in_channel(
+        slack_response = await respond_in_channel(
             response_url,
-            f"Meeting ready: {meet_link}",
-            blocks
-        )
+             f"Meeting ready: {meet_link}",
+             blocks
+            )
+
+        message_ts = slack_response.get("ts")
+
+        if message_ts:
+           record.slack_message_ts = message_ts
+           db.commit()
 
     except Exception as e:
 
