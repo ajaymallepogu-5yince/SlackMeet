@@ -39,3 +39,4 @@ class MeetingRecord(Base):
     calendar_event_id = Column(String)   # Google Calendar event id for deletion
     slack_message_ts = Column(String)    # Slack message timestamp for updating
     channel_id = Column(String)          # Slack channel for updating message
+    response_url = Column(Text)  # Slack response_url for replacing message
