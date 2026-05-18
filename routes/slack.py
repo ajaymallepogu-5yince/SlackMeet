@@ -904,6 +904,7 @@ async def handle_instant_meet(
             start_time="now",
             calendar_event_id=cal_event_id,
             channel_id=channel_id,
+            response_url=response_url,
         )
 
         db.add(record)
@@ -916,7 +917,7 @@ async def handle_instant_meet(
             "channel_id": channel_id,
             "uid": uid,
             "uname": uname,
-            "response_url": response_url,
+            
         })
 
         blocks = [
@@ -1161,6 +1162,7 @@ async def handle_scheduled_meeting(
             start_time=f"{date} {time}",
             calendar_event_id=calendar_event_id,
             channel_id=channel_id,
+            response_url=response_url,
         )
 
         db.add(record)
@@ -1173,7 +1175,6 @@ async def handle_scheduled_meeting(
             "channel_id": channel_id,
             "uid": metadata.get("uid"),
             "uname": metadata.get("uname"),
-            "response_url": response_url,
         })
 
         blocks = [
