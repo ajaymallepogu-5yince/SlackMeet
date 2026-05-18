@@ -612,6 +612,8 @@ async def handle_instant_meet(
         ]
 
         await post_meeting_message(response_url, f"Meeting ready: {meet_link}", blocks)
+         # ── Explicitly save response_url after posting ──
+        record.response_url = response_url
         db.commit()
 
     except Exception as e:
@@ -769,6 +771,8 @@ async def handle_scheduled_meeting(
         ]
 
         await post_meeting_message(response_url, f"Meeting scheduled: {meet_link}", blocks)
+        # ── Explicitly save response_url after posting ──
+        record.response_url = response_url
         db.commit()
 
     except Exception as e:
