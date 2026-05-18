@@ -534,15 +534,28 @@ async def handle_cancel_meeting(
         if not record:
             return
 
-        bot_token = get_token(team_id)
-
-        # ── Delete the meeting card message from the channel ──
-        if record.slack_message_ts and record.channel_id:
-            await slack_api(bot_token, "chat.delete", {
-                "channel": record.channel_id,
-                "ts": record.slack_message_ts,
-            })
-            print(f"DEBUG chat.delete: channel={record.channel_id} ts={record.slack_message_ts}")
+        # ── Replace meeting card with "cancelled" via response_url ──
+        if record.response_url:
+            payload = {
+                "replace_original": "true",
+                "text": "🗑 Meeting cancelled.",
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "🗑 *Meeting cancelled.*"
+                        }
+                    }
+                ]
+            }
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    record.response_url,
+                    json=payload,
+                    timeout=20,
+                )
+            print(f"DEBUG replace_original: {resp.status_code} {resp.text}")
 
         # ── Cancel Google Calendar event ──
         organiser = get_db_user(db, user_id)
@@ -551,7 +564,7 @@ async def handle_cancel_meeting(
 
         db.delete(record)
         db.commit()
-        print(f"✅ Meeting cancelled and message deleted: {event_id}")
+        print(f"✅ Meeting cancelled: {event_id}")
 
     except Exception as e:
         print(f"🔥 Cancel Meeting ERROR: {e}")
@@ -688,26 +701,13 @@ async def slack_actions(
 
                 # Post "Meeting Cancelled" notice to the channel
                 # (the meeting message itself is deleted inside handle_cancel_meeting)
-                await respond_in_channel(
-                    value["response_url"],
-                    "❌ Meeting Cancelled",
-                    blocks=[
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": (
-                                    "❌ *Meeting Cancelled*\n\n"
-                                    "The meeting and calendar event "
-                                    "were cancelled successfully.\n\n"
-                                    "Use `/meet @user` to start a new meeting."
-                                )
-                            }
-                        }
-                    ]
-                )
+                if action_id == "cancel_meeting":
 
-                # Delete meeting message + cancel calendar in background
+                 event_id = value.get("event_id")
+
+                if not event_id:
+                    return JSONResponse({})
+
                 background_tasks.add_task(
                     handle_cancel_meeting,
                     event_id,
