@@ -173,12 +173,19 @@ async def respond_to_user(
 # ─────────────────────────────────────────────────────────────────
 
 async def post_meeting_message(
-    response_url: str,
+    bot_token: str,
+    channel_id: str,
     text: str,
     blocks: list,
-):
-    """Post the meeting card in-channel via response_url."""
-    await respond_in_channel(response_url, text, blocks=blocks)
+) -> str | None:
+    """Post meeting card via chat.postMessage. Returns ts for deletion later."""
+    result = await slack_api(bot_token, "chat.postMessage", {
+        "channel": channel_id,
+        "text": text,
+        "blocks": blocks,
+    })
+    print(f"DEBUG chat.postMessage result: {result}")
+    return result.get("ts")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -519,44 +526,37 @@ async def handle_cancel_meeting(
     user_id: str,
     team_id: str,
 ):
-
     db = SessionLocal()
 
     try:
-
-        record = db.query(
-            MeetingRecord
-        ).filter(
+        record = db.query(MeetingRecord).filter(
             MeetingRecord.event_id == event_id
         ).first()
 
         if not record:
             return
 
-        # Replace the meeting card in-place (remove buttons, show cancelled)
-        if record.response_url:
-            await replace_meeting_message_with_cancelled(record.response_url)
+        bot_token = get_token(team_id)
 
-        # Cancel the Google Calendar event
+        # ── Delete the meeting card message from the channel ──
+        if record.slack_message_ts and record.channel_id:
+            await slack_api(bot_token, "chat.delete", {
+                "channel": record.channel_id,
+                "ts": record.slack_message_ts,
+            })
+            print(f"DEBUG chat.delete: channel={record.channel_id} ts={record.slack_message_ts}")
+
+        # ── Cancel Google Calendar event ──
         organiser = get_db_user(db, user_id)
-
         if organiser and record.calendar_event_id:
-            cancel_calendar_event(
-                organiser,
-                record.calendar_event_id
-            )
+            cancel_calendar_event(organiser, record.calendar_event_id)
 
         db.delete(record)
         db.commit()
-
-        print(f"✅ Meeting cancelled: {event_id}")
+        print(f"✅ Meeting cancelled and message deleted: {event_id}")
 
     except Exception as e:
-
-        print(
-            "🔥 Cancel Meeting ERROR:",
-            str(e)
-        )
+        print(f"🔥 Cancel Meeting ERROR: {e}")
 
     finally:
         db.close()
@@ -956,13 +956,19 @@ async def handle_instant_meet(
         # Save response_url so cancel can replace this message later.
         # ─────────────────────────────────────────────────────────
 
-        await post_meeting_message(
-            response_url,
+        # ── NEW ──
+        bot_token = get_token(team_id)
+
+        msg_ts = await post_meeting_message(
+            bot_token,
+            channel_id,
             f"Meeting ready: {meet_link}",
             blocks,
         )
 
         record.response_url = response_url
+        record.slack_message_ts = msg_ts
+        record.channel_id = channel_id
         db.commit()
 
     except Exception as e:
@@ -1223,13 +1229,17 @@ async def handle_scheduled_meeting(
         # Save response_url so cancel can replace this message later.
         # ─────────────────────────────────────────────────────────
 
-        await post_meeting_message(
-            response_url,
+        # ── NEW ──
+        msg_ts = await post_meeting_message(
+            bot_token,
+            channel_id,
             f"Meeting scheduled: {meet_link}",
             blocks,
         )
 
         record.response_url = response_url
+        record.slack_message_ts = msg_ts
+        record.channel_id = channel_id
         db.commit()
 
     except Exception as e:
