@@ -128,7 +128,7 @@ async def respond_in_channel(
         "DEBUG response_url:",
         response.status_code
     )
-
+    print("DEBUG response_url body:", response.text)   
     try:
         return response.json()
     except Exception:
