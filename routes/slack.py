@@ -173,19 +173,17 @@ async def respond_to_user(
 # ─────────────────────────────────────────────────────────────────
 
 async def post_meeting_message(
-    bot_token: str,
-    channel_id: str,
+    response_url: str,
     text: str,
     blocks: list,
 ) -> str | None:
-    """Post meeting card via chat.postMessage. Returns ts for deletion later."""
-    result = await slack_api(bot_token, "chat.postMessage", {
-        "channel": channel_id,
-        "text": text,
-        "blocks": blocks,
-    })
-    print(f"DEBUG chat.postMessage result: {result}")
-    return result.get("ts")
+    """Post via response_url and try to capture ts."""
+
+    result = await respond_in_channel(response_url, text, blocks=blocks)
+
+    print(f"DEBUG post_meeting_message full response: {result}")
+
+    return result.get("ts") or result.get("message", {}).get("ts")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -957,11 +955,8 @@ async def handle_instant_meet(
         # ─────────────────────────────────────────────────────────
 
         # ── NEW ──
-        bot_token = get_token(team_id)
-
         msg_ts = await post_meeting_message(
-            bot_token,
-            channel_id,
+            response_url,
             f"Meeting ready: {meet_link}",
             blocks,
         )
@@ -1229,10 +1224,8 @@ async def handle_scheduled_meeting(
         # Save response_url so cancel can replace this message later.
         # ─────────────────────────────────────────────────────────
 
-        # ── NEW ──
         msg_ts = await post_meeting_message(
-            bot_token,
-            channel_id,
+            response_url,
             f"Meeting scheduled: {meet_link}",
             blocks,
         )
