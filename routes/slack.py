@@ -120,16 +120,71 @@ async def respond_to_user(
 
 # ─────────────────────────────────────────────────────────────────
 # Post Meeting Message
+# Uses chat.postMessage instead of response_url
+# Posts in SAME channel where /meet was used
 # ─────────────────────────────────────────────────────────────────
 
 async def post_meeting_message(
-    response_url: str,
+    bot_token: str,
+    channel_id: str,
     text: str,
     blocks: list,
-) -> str | None:
-    result = await respond_in_channel(response_url, text, blocks=blocks)
-    print(f"DEBUG post_meeting_message full response: {result}")
-    return result.get("ts") or result.get("message", {}).get("ts")
+) -> tuple[str | None, str | None]:
+
+    result = await slack_api(
+        bot_token,
+        "chat.postMessage",
+        {
+            "channel": channel_id,
+            "text": text,
+            "blocks": blocks,
+        }
+    )
+
+    print(f"DEBUG chat.postMessage response: {result}")
+
+    return (
+        result.get("channel"),
+        result.get("ts"),
+    )
+
+# ─────────────────────────────────────────────────────────────────
+# Replace Meeting Message with Cancelled
+# Uses chat.update instead of response_url
+# ─────────────────────────────────────────────────────────────────
+
+async def replace_meeting_message_with_cancelled(
+    bot_token: str,
+    channel_id: str,
+    slack_message_ts: str,
+):
+
+    if not channel_id or not slack_message_ts:
+        return
+
+    result = await slack_api(
+        bot_token,
+        "chat.update",
+        {
+            "channel": channel_id,
+            "ts": slack_message_ts,
+            "text": "🗑 Meeting cancelled.",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            "🗑 *Meeting cancelled.*\n"
+                            "Use `/meet @user` to start a new meeting."
+                        )
+                    }
+                }
+            ]
+        }
+    )
+
+    print(f"DEBUG chat.update response: {result}")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -327,47 +382,62 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
 # Cancel Meeting Handler
 # ─────────────────────────────────────────────────────────────────
 
-async def handle_cancel_meeting(event_id: str, user_id: str, team_id: str):
+async def handle_cancel_meeting(
+    event_id: str,
+    user_id: str,
+    team_id: str,
+):
+
     db = SessionLocal()
+
     try:
+
         record = db.query(MeetingRecord).filter(
             MeetingRecord.event_id == event_id
         ).first()
 
         if not record:
-            print(f"⚠️ Meeting {event_id} already cancelled")
+            print(f"⚠️ Meeting already cancelled: {event_id}")
             return
 
-        # ── Replace meeting card with cancelled notice ──
-        if record.response_url:
-            payload = {
-                "replace_original": "true",
-                "text": "🗑 Meeting cancelled.",
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": "🗑 *Meeting cancelled.*"
-                        }
-                    }
-                ]
-            }
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(record.response_url, json=payload, timeout=20)
-            print(f"DEBUG replace_original: {resp.status_code} {resp.text}")
+        bot_token = get_token(team_id)
 
-        # ── Cancel Google Calendar event ──
+        # ─────────────────────────────────────────────────────────
+        # Replace Slack message in-place
+        # ─────────────────────────────────────────────────────────
+
+        await replace_meeting_message_with_cancelled(
+            bot_token=bot_token,
+            channel_id=record.channel_id,
+            slack_message_ts=record.slack_message_ts,
+        )
+
+        # ─────────────────────────────────────────────────────────
+        # Cancel Google Calendar Event
+        # ─────────────────────────────────────────────────────────
+
         organiser = get_db_user(db, user_id)
+
         if organiser and record.calendar_event_id:
-            cancel_calendar_event(organiser, record.calendar_event_id)
+
+            cancel_calendar_event(
+                organiser,
+                record.calendar_event_id
+            )
+
+        # ─────────────────────────────────────────────────────────
+        # Delete DB Record
+        # ─────────────────────────────────────────────────────────
 
         db.delete(record)
         db.commit()
+
         print(f"✅ Meeting cancelled: {event_id}")
 
     except Exception as e:
+
         print(f"🔥 Cancel Meeting ERROR: {e}")
+
     finally:
         db.close()
 
@@ -611,9 +681,15 @@ async def handle_instant_meet(
             }
         ]
 
-        await post_meeting_message(response_url, f"Meeting ready: {meet_link}", blocks)
-         # ── Explicitly save response_url after posting ──
-        record.response_url = response_url
+        channel, msg_ts = await post_meeting_message(
+    bot_token=bot_token,
+    channel_id=channel_id,
+    text=f"Meeting ready: {meet_link}",
+    blocks=blocks,
+)
+        record.channel_id = channel
+        record.slack_message_ts = msg_ts
+
         db.commit()
 
     except Exception as e:
@@ -770,9 +846,15 @@ async def handle_scheduled_meeting(
             }
         ]
 
-        await post_meeting_message(response_url, f"Meeting scheduled: {meet_link}", blocks)
-        # ── Explicitly save response_url after posting ──
-        record.response_url = response_url
+        channel, msg_ts = await post_meeting_message(
+    bot_token=bot_token,
+    channel_id=channel_id,
+    text=f"Meeting scheduled: {meet_link}",
+    blocks=blocks,
+)
+        record.channel_id = channel
+        record.slack_message_ts = msg_ts
+
         db.commit()
 
     except Exception as e:
