@@ -572,8 +572,7 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                 })
 
                 return JSONResponse({
-                    "response_type": "ephemeral",
-                    "text": "Are you sure?",
+                    "replace_original": True,
                     "blocks": [
                         {
                             "type": "section",
