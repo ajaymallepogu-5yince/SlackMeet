@@ -226,6 +226,38 @@ def member_display_name(member: dict):
 
 
 # ─────────────────────────────────────────────────────────────────
+# Mention Validation Helpers
+# ─────────────────────────────────────────────────────────────────
+
+async def validate_mentions_in_channel(
+    bot_token: str,
+    channel_id: str,
+    invited_members: list[dict],
+) -> tuple[list[dict], list[str]]:
+    """Check all invited members are in the channel.
+    Returns (valid_members, outsider_names)."""
+
+    result = await slack_api(bot_token, "conversations.members", {
+        "channel": channel_id
+    })
+
+    channel_member_ids = set(result.get("members", []))
+
+    if not channel_member_ids:
+        return invited_members, []
+
+    valid = []
+    outsiders = []
+
+    for m in invited_members:
+        if m.get("id") in channel_member_ids:
+            valid.append(m)
+        else:
+            outsiders.append(member_display_name(m))
+
+    return valid, outsiders
+
+# ─────────────────────────────────────────────────────────────────
 # Slash Command
 # ─────────────────────────────────────────────────────────────────
 
@@ -245,6 +277,27 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
         uname = mentions[0][1] if mentions else None
 
         print(f"DEBUG /meet user={user_id} channel={channel_id} text={text}")
+
+        # ── No mentions — show helper message ──
+        if not mentions:
+            return JSONResponse({
+                "response_type": "ephemeral",
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                "👋 *How to use MeetNow:*\n\n"
+                                "• `/meet @user` — shows Connect Now / Schedule Later\n"
+                                "• `/meet @user lets connect` — starts instant meeting\n"
+                                "• `/meet @user1 @user2` — meeting with multiple people\n\n"
+                                "💡 *Try:* `/meet @someone`"
+                            )
+                        }
+                    }
+                ]
+            })
 
         # ── Instant keywords ──
         instant_keywords = [
@@ -269,8 +322,12 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
                 "text": "🚀 Starting instant meeting..."
             })
 
+
         # ── Show Connect Now / Schedule Later buttons ──
-        shared_session_id = str(uuid.uuid4())   # ← defined BEFORE use
+        shared_session_id = str(uuid.uuid4())
+
+        # Build mentions display for header
+        mentions_display = " ".join([f"<@{u}>" for u, _ in mentions if u])
 
         shared_value = json.dumps({
             "session_id": shared_session_id,
@@ -279,7 +336,7 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
             "channel_id": channel_id,
             "uid": uid,
             "uname": uname,
-            "mentions": mentions,       # ← all mentions saved
+            "mentions": mentions,
             "response_url": response_url,
         })
 
@@ -291,8 +348,8 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
                     "text": {
                         "type": "mrkdwn",
                         "text": (
-                            f"🤝 Meeting with <@{uid}>"
-                            if uid
+                            f"🤝 Meeting with {mentions_display}"
+                            if mentions_display
                             else "🤝 Start a meeting"
                         )
                     }
@@ -321,6 +378,7 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
     except Exception as e:
         print("🔥 /meet ERROR:", str(e))
         return JSONResponse({"response_type": "ephemeral", "text": "Something went wrong."})
+
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -462,7 +520,6 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                 })
 
             # ── Cancel Meeting ──
-            # ── Cancel Meeting ──
             if action_id == "cancel_meeting":
                 event_id = value.get("event_id")
                 if not event_id:
@@ -472,14 +529,136 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                 action_response_url = payload.get("response_url")
                 print(f"DEBUG action_response_url: {action_response_url}")
 
+                # define confirm_value before using it below
+                confirm_value = json.dumps({
+                    "event_id": event_id,
+                    "user_id": value["user_id"],
+                    "team_id": value["team_id"],
+                    "action_response_url": action_response_url,
+                })
+
+                return JSONResponse({
+                    "response_type": "ephemeral",
+                    "text": "Are you sure?",
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "🗑 *Are you sure you want to cancel this meeting?*\n\nThis will also delete the Google Calendar event."
+                            }
+                        },
+                        {
+                            "type": "actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "style": "danger",
+                                    "text": {"type": "plain_text", "text": "✅ Yes, cancel it"},
+                                    "action_id": "confirm_cancel_meeting",
+                                    "value": confirm_value
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "⬅️ No, keep it"},
+                                    "action_id": "dismiss_cancel",
+                                    "value": "{}"
+                                }
+                            ]
+                        }
+                    ]
+                })
+
+            # ── Confirm Cancel ──
+            if action_id == "confirm_cancel_meeting":
+                confirm_data = json.loads(action.get("value", "{}"))
+                action_response_url = confirm_data.get("action_response_url")
+
                 background_tasks.add_task(
                     handle_cancel_meeting,
-                    event_id,
-                    value["user_id"],
-                    value["team_id"],
-                    action_response_url,  # ← pass it directly
+                    confirm_data["event_id"],
+                    confirm_data["user_id"],
+                    confirm_data["team_id"],
+                    action_response_url,
                 )
-                return JSONResponse({})
+
+                return JSONResponse({
+                    "response_type": "ephemeral",
+                    "replace_original": True,
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "🗑 Cancelling meeting..."
+                            }
+                        }
+                    ]
+                })
+
+            # ── Dismiss Cancel ──
+            if action_id == "dismiss_cancel":
+                return JSONResponse({
+                    "response_type": "ephemeral",
+                    "replace_original": True,
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "👍 Meeting kept."
+                            }
+                        }
+                    ]
+                })
+            
+            # ── Confirm Include Outsiders ──
+            if action_id == "confirm_include_outsiders":
+                confirm_data = json.loads(action.get("value", "{}"))
+                event_type = confirm_data.get("event_type")
+
+                if event_type == "instant":
+                    background_tasks.add_task(
+                        handle_instant_meet_confirmed,
+                        confirm_data["user_id"],
+                        confirm_data["team_id"],
+                        confirm_data["channel_id"],
+                        confirm_data["mentions"],
+                        confirm_data["response_url"],
+                    )
+                elif event_type == "scheduled":
+                    await open_schedule_modal(
+                        trigger_id=payload["trigger_id"],
+                        metadata=confirm_data,
+                        team_id=confirm_data["team_id"],
+                    )
+
+                return JSONResponse({
+                    "response_type": "ephemeral",
+                    "replace_original": True,
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": "✅ Including all mentioned users..."}
+                        }
+                    ]
+                })
+
+            # ── Cancel Include Outsiders ──
+            if action_id == "cancel_include_outsiders":
+                return JSONResponse({
+                    "response_type": "ephemeral",
+                    "replace_original": True,
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "❌ Meeting cancelled. Use `/meet @user` to try again."
+                            }
+                        }
+                    ]
+                })
 
         # ── Modal Submit ──
         if payload_type == "view_submission":
@@ -529,8 +708,67 @@ async def handle_instant_meet(
 
         # ── Resolve ALL mentioned users ──
         invited_members = await resolve_invited_users(bot_token, mentions)
-        invited_emails = [member_email(m) for m in invited_members if member_email(m)]
-        invited_names = [member_display_name(m) for m in invited_members] or ["Guest"]
+
+        # ── Check if any mentioned users are outside this channel ──
+        valid_members, outsiders = await validate_mentions_in_channel(
+            bot_token, channel_id, invited_members
+        )
+
+        if outsiders:
+            outsiders_display = ", ".join(outsiders)
+            # Show confirmation — store mentions in value for confirm button
+            confirm_value = json.dumps({
+                "event_type": "instant",
+                "user_id": user_id,
+                "team_id": team_id,
+                "channel_id": channel_id,
+                "mentions": mentions,
+                "response_url": response_url,
+            })
+            await respond_to_user(
+                response_url=response_url,
+                text=f"⚠️ {outsiders_display} are not in this conversation.",
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                f"⚠️ *{outsiders_display}* "
+                                f"{'is' if len(outsiders) == 1 else 'are'} "
+                                f"not part of this conversation.\n\n"
+                                f"Do you still want to include "
+                                f"{'them' if len(outsiders) > 1 else 'them'} "
+                                f"in the meeting invite?"
+                            )
+                        }
+                    },
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "style": "primary",
+                                "text": {"type": "plain_text", "text": "✅ Yes, include them"},
+                                "action_id": "confirm_include_outsiders",
+                                "value": confirm_value
+                            },
+                            {
+                                "type": "button",
+                                "style": "danger",
+                                "text": {"type": "plain_text", "text": "❌ No, cancel"},
+                                "action_id": "cancel_include_outsiders",
+                                "value": "{}"
+                            }
+                        ]
+                    }
+                ]
+            )
+            return
+
+        # ── All users valid — proceed ──
+        invited_emails = [member_email(m) for m in valid_members if member_email(m)]
+        invited_names = [member_display_name(m) for m in valid_members] or ["Guest"]
         names_display = ", ".join(invited_names)
 
         organiser = get_db_user(db, user_id)
@@ -635,6 +873,118 @@ async def handle_instant_meet(
         db.close()
 
 
+async def handle_instant_meet_confirmed(
+    user_id: str,
+    team_id: str,
+    channel_id: str,
+    mentions: list,
+    response_url: str,
+):
+    """Same as handle_instant_meet but skips outsider validation."""
+    db = SessionLocal()
+    try:
+        bot_token = get_token(team_id)
+
+        invited_members = await resolve_invited_users(bot_token, mentions)
+        invited_emails = [member_email(m) for m in invited_members if member_email(m)]
+        invited_names = [member_display_name(m) for m in invited_members] or ["Guest"]
+        names_display = ", ".join(invited_names)
+
+        organiser = get_db_user(db, user_id)
+        if not organiser:
+            auth_url = f"{BASE_URL}/auth?user_id={user_id}&team_id={team_id}"
+            await respond_to_user(
+                response_url=response_url,
+                text="Google connection required",
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "🔐 *Connect your Google account*\n\nMeetNow needs Google Calendar access."
+                        }
+                    },
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "style": "primary",
+                                "text": {"type": "plain_text", "text": "🔗 Connect Google"},
+                                "url": auth_url
+                            }
+                        ]
+                    }
+                ]
+            )
+            return
+
+        meet_link, cal_event_id = create_meeting(
+            organiser,
+            attendee_emails=invited_emails if invited_emails else None
+        )
+
+        if not meet_link:
+            await respond_in_channel(response_url, "❌ Failed to create meeting.")
+            return
+
+        event_id = str(uuid.uuid4())
+        record = MeetingRecord(
+            event_id=event_id,
+            user_id=user_id,
+            team_id=team_id,
+            title="Instant Meeting",
+            meet_link=meet_link,
+            start_time="now",
+            calendar_event_id=cal_event_id,
+            channel_id=channel_id,
+            response_url=response_url,
+        )
+        db.add(record)
+        db.commit()
+
+        action_value = json.dumps({
+            "event_id": event_id,
+            "user_id": user_id,
+            "team_id": team_id,
+            "channel_id": channel_id,
+        })
+
+        blocks = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"🚀 *Meeting Ready!*\n\n"
+                        f"👤 Started by <@{user_id}>\n"
+                        f"🤝 With: {names_display}\n"
+                        f"📞 {meet_link}"
+                    )
+                }
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "style": "danger",
+                        "text": {"type": "plain_text", "text": "🗑 Cancel Meeting"},
+                        "action_id": "cancel_meeting",
+                        "value": action_value
+                    }
+                ]
+            }
+        ]
+
+        await post_meeting_message(response_url, f"Meeting ready: {meet_link}", blocks)
+        db.commit()
+
+    except Exception as e:
+        print(f"🔥 handle_instant_meet_confirmed ERROR: {e}")
+    finally:
+        db.close()
+
 # ─────────────────────────────────────────────────────────────────
 # Schedule Modal
 # ─────────────────────────────────────────────────────────────────
@@ -715,8 +1065,67 @@ async def handle_scheduled_meeting(
 
         # ── Resolve ALL mentioned users ──
         invited_members = await resolve_invited_users(bot_token, mentions)
-        invited_emails = [member_email(m) for m in invited_members if member_email(m)]
-        invited_names = [member_display_name(m) for m in invited_members] or ["Guest"]
+
+        # ── Check if any mentioned users are outside this channel ──
+        valid_members, outsiders = await validate_mentions_in_channel(
+            bot_token, channel_id, invited_members
+        )
+
+        if outsiders:
+            outsiders_display = ", ".join(outsiders)
+            # Show confirmation — store mentions in value for confirm button
+            confirm_value = json.dumps({
+                "event_type": "scheduled",
+                "user_id": user_id,
+                "team_id": team_id,
+                "channel_id": channel_id,
+                "mentions": mentions,
+                "response_url": response_url,
+            })
+            await respond_to_user(
+                response_url=response_url,
+                text=f"⚠️ {outsiders_display} are not in this conversation.",
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                f"⚠️ *{outsiders_display}* "
+                                f"{'is' if len(outsiders) == 1 else 'are'} "
+                                f"not part of this conversation.\n\n"
+                                f"Do you still want to include "
+                                f"{'them' if len(outsiders) > 1 else 'them'} "
+                                f"in the meeting invite?"
+                            )
+                        }
+                    },
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "style": "primary",
+                                "text": {"type": "plain_text", "text": "✅ Yes, include them"},
+                                "action_id": "confirm_include_outsiders",
+                                "value": confirm_value
+                            },
+                            {
+                                "type": "button",
+                                "style": "danger",
+                                "text": {"type": "plain_text", "text": "❌ No, cancel"},
+                                "action_id": "cancel_include_outsiders",
+                                "value": "{}"
+                            }
+                        ]
+                    }
+                ]
+            )
+            return
+
+        # ── All users valid — proceed ──
+        invited_emails = [member_email(m) for m in valid_members if member_email(m)]
+        invited_names = [member_display_name(m) for m in valid_members] or ["Guest"]
         names_display = ", ".join(invited_names)
 
         meet_link, calendar_event_id = create_scheduled_meeting(
