@@ -237,6 +237,11 @@ async def validate_mentions_in_channel(
     """Check all invited members are in the channel.
     Returns (valid_members, outsider_names)."""
 
+     # ── Skip validation for DM channels ──
+    if not channel_id or channel_id.startswith("D"):
+        return invited_members, []   # ← allow all, no outsider check for DMs
+
+
     result = await slack_api(bot_token, "conversations.members", {
         "channel": channel_id
     })
