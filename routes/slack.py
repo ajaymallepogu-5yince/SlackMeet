@@ -417,6 +417,7 @@ async def handle_cancel_meeting(
     team_id: str,
     action_response_url: str = None,  # ← add this
 ):
+    print(f"DEBUG handle_cancel_meeting START event_id={event_id}")  # ← ADD
     db = SessionLocal()
     try:
         record = db.query(MeetingRecord).filter(
@@ -431,6 +432,7 @@ async def handle_cancel_meeting(
 
         # ── Use action_response_url — points to the actual meeting card ──
         cancel_url = action_response_url or record.response_url
+        print(f"DEBUG cancel_url: {cancel_url}")  # ← ADD
 
         if cancel_url:
             cancel_payload = {
