@@ -483,6 +483,8 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
             value = json.loads(action.get("value", "{}"))
             session_id = value.get("session_id")
             action_id = action.get("action_id")
+            print(f"DEBUG action_id received: {action_id}")   # ← ADD THIS
+            print(f"DEBUG value received: {value}")   
 
             # ── Dead session check ──
             if (
@@ -549,8 +551,12 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
 
             # ── Cancel Meeting ──
             if action_id == "cancel_meeting":
+                print(f"DEBUG cancel_meeting triggered")        # ← ADD
+                print(f"DEBUG value: {value}")  
                 event_id = value.get("event_id")
+                print(f"DEBUG event_id: {event_id}") 
                 if not event_id:
+                    print("DEBUG event_id is None — returning empty")  # ← ADD
                     return JSONResponse({})
 
                 # ── This points directly to the meeting card message ──
