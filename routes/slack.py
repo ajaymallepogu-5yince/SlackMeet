@@ -272,13 +272,36 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
         text = (form.get("text") or "").strip()
         response_url = form.get("response_url")
 
+        print(f"DEBUG /meet user={user_id} channel={channel_id} text={text}")
+
+        # ── 1. Return instantly for empty text ──
+        if not text:
+            return JSONResponse({
+                "response_type": "ephemeral",
+                "text": "👋 Try: `/meet @someone`",
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                "👋 *How to use MeetNow:*\n\n"
+                                "• `/meet @user` — shows Connect Now / Schedule Later\n"
+                                "• `/meet @user lets connect` — starts instant meeting\n"
+                                "• `/meet @user1 @user2` — meeting with multiple people\n\n"
+                                "💡 *Try:* `/meet @someone`"
+                            )
+                        }
+                    }
+                ]
+            })
+
+        # ── 2. Extract mentions from text ──
         mentions = extract_mentions(text)
         uid = mentions[0][0] if mentions else None
         uname = mentions[0][1] if mentions else None
 
-        print(f"DEBUG /meet user={user_id} channel={channel_id} text={text}")
-
-        # ── No mentions — show helper message ──
+        # ── 3. No mentions found — show helper ──
         if not mentions:
             return JSONResponse({
                 "response_type": "ephemeral",
@@ -299,7 +322,7 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
                 ]
             })
 
-        # ── Instant keywords ──
+        # ── 4. Check instant keywords ──
         instant_keywords = [
             "lets connect", "let's connect", "connect", "call",
             "lets meet", "let's meet", "meet", "instant meeting",
@@ -314,7 +337,7 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
                 user_id,
                 team_id,
                 channel_id,
-                mentions,       # ← full mentions list
+                mentions,
                 response_url,
             )
             return JSONResponse({
@@ -322,11 +345,9 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
                 "text": "🚀 Starting instant meeting..."
             })
 
-
-        # ── Show Connect Now / Schedule Later buttons ──
+        # ── 5. Show Connect Now / Schedule Later buttons ──
         shared_session_id = str(uuid.uuid4())
 
-        # Build mentions display for header
         mentions_display = " ".join([f"<@{u}>" for u, _ in mentions if u])
 
         shared_value = json.dumps({
