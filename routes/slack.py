@@ -598,8 +598,8 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                     ]
                 )
 
-                return JSONResponse({})  # ← empty response, meeting card stays untouched
-
+                return JSONResponse({})  
+            
             # ── Confirm Cancel ──
             if action_id == "confirm_cancel_meeting":
                 confirm_data = json.loads(action.get("value", "{}"))
