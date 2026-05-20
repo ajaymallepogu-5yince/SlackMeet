@@ -435,21 +435,20 @@ async def handle_cancel_meeting(
         print(f"DEBUG cancel_url: {cancel_url}")  # ← ADD
 
         if cancel_url:
-            cancel_payload = {
-                "replace_original": True,
-                "text": "🗑 Meeting cancelled.",
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": "🗑 *Meeting cancelled.*"
-                        }
-                    }
-                ]
-            }
             async with httpx.AsyncClient() as client:
-                resp = await client.post(cancel_url, json=cancel_payload, timeout=20)
+                resp = await client.post(cancel_url, json={
+                    "replace_original": True,
+                    "text": f"🗑 Meeting cancelled by <@{user_id}>",
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"🗑 *Meeting \"{record.title}\" was cancelled by <@{user_id}>*"
+                            }
+                        }
+                    ]
+                }, timeout=20)
             print(f"DEBUG replace_original: {resp.status_code} {resp.text}")
 
         # ── Cancel Google Calendar event ──
@@ -549,7 +548,7 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                     ]
                 })
 
-            # ── Cancel Meeting ──
+            
             # ── Cancel Meeting ──
             if action_id == "cancel_meeting":
                 event_id = value.get("event_id")
@@ -557,6 +556,9 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                     return JSONResponse({})
 
                 action_response_url = payload.get("response_url")
+                clicker_user_id = payload["user"]["id"]
+                channel_id = value.get("channel_id") or payload["channel"]["id"]
+                bot_token = get_token(value["team_id"])
 
                 confirm_value = json.dumps({
                     "event_id": event_id,
@@ -564,12 +566,18 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                     "team_id": value["team_id"],
                     "action_response_url": action_response_url,
                 })
+                dismiss_value = json.dumps({
+                    "event_id": event_id,
+                    "user_id": value["user_id"],
+                    "team_id": value["team_id"],
+                    "action_response_url": action_response_url,
+                })
 
-                # ── Ephemeral confirmation — only visible to person who clicked ──
-                await respond_to_user(
-                    response_url=action_response_url,
-                    text="Are you sure?",
-                    blocks=[
+                await slack_api(bot_token, "chat.postEphemeral", {
+                    "channel": channel_id,
+                    "user": clicker_user_id,
+                    "text": "Are you sure you want to cancel this meeting?",
+                    "blocks": [
                         {
                             "type": "section",
                             "text": {
@@ -588,20 +596,15 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                                     "value": confirm_value
                                 },
                                 {
-                                   "type": "button",
-                                   "text": {"type": "plain_text", "text": "⬅️ No, keep it"},
-                                   "action_id": "dismiss_cancel",
-                                   "value": json.dumps({
-                                   "event_id": event_id,
-                                   "user_id": value["user_id"],
-                                   "team_id": value["team_id"],
-                                   "action_response_url": action_response_url,
-                                       })
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "⬅️ No, keep it"},
+                                    "action_id": "dismiss_cancel",
+                                    "value": dismiss_value
                                 }
                             ]
                         }
                     ]
-                )
+                })
 
                 return JSONResponse({})  
             
