@@ -436,7 +436,7 @@ async def handle_cancel_meeting(
 
         if cancel_url:
             cancel_payload = {
-                "replace_original": "true",
+                "replace_original": True,
                 "text": "🗑 Meeting cancelled.",
                 "blocks": [
                     {
@@ -572,35 +572,45 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                 })
 
                 return JSONResponse({
-                    "replace_original": True,
-                    "blocks": [
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": "🗑 *Are you sure you want to cancel this meeting?*\n\nThis will also delete the Google Calendar event."
-                            }
-                        },
-                        {
-                            "type": "actions",
-                            "elements": [
-                                {
-                                    "type": "button",
-                                    "style": "danger",
-                                    "text": {"type": "plain_text", "text": "✅ Yes, cancel it"},
-                                    "action_id": "confirm_cancel_meeting",
-                                    "value": confirm_value
-                                },
-                                {
-                                    "type": "button",
-                                    "text": {"type": "plain_text", "text": "⬅️ No, keep it"},
-                                    "action_id": "dismiss_cancel",
-                                    "value": "{}"
-                                }
-                            ]
-                        }
-                    ]
-                })
+    "replace_original": True,
+    "text": "Cancel confirmation",
+    "blocks": [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    "🗑 *Are you sure you want to cancel this meeting?*\n\n"
+                    "This will also delete the Google Calendar event."
+                )
+            }
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "style": "danger",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "✅ Yes, cancel it"
+                    },
+                    "action_id": "confirm_cancel_meeting",
+                    "value": confirm_value
+                },
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "⬅️ No, keep it"
+                    },
+                    "action_id": "dismiss_cancel",
+                    "value": "{}"
+                }
+            ]
+        }
+    ]
+})
 
             # ── Confirm Cancel ──
             if action_id == "confirm_cancel_meeting":
@@ -616,34 +626,34 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                 )
 
                 return JSONResponse({
-                    "response_type": "ephemeral",
-                    "replace_original": True,
-                    "blocks": [
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": "🗑 Cancelling meeting..."
-                            }
-                        }
-                    ]
-                })
+    "replace_original": True,
+    "text": "🗑 Meeting cancelled.",
+    "blocks": [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "🗑 *Meeting cancelled successfully.*"
+            }
+        }
+    ]
+})
 
             # ── Dismiss Cancel ──
             if action_id == "dismiss_cancel":
                 return JSONResponse({
-                    "response_type": "ephemeral",
-                    "replace_original": True,
-                    "blocks": [
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": "👍 Meeting kept."
-                            }
-                        }
-                    ]
-                })
+    "replace_original": True,
+    "text": "👍 Meeting kept.",
+    "blocks": [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "👍 *Meeting kept.*"
+            }
+        }
+    ]
+})
             
             # ── Confirm Include Outsiders ──
             if action_id == "confirm_include_outsiders":
@@ -680,7 +690,6 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
             # ── Cancel Include Outsiders ──
             if action_id == "cancel_include_outsiders":
                 return JSONResponse({
-                    "response_type": "ephemeral",
                     "replace_original": True,
                     "blocks": [
                         {
