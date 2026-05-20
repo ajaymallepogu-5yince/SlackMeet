@@ -427,12 +427,9 @@ async def handle_cancel_meeting(
             print(f"⚠️ Meeting {event_id} already cancelled")
             return
 
-        # ── Always use the saved response_url to update the meeting card ──
-        cancel_url = record.response_url  # ← NOT action_response_url
-
-        if cancel_url:
+        if action_response_url:
             async with httpx.AsyncClient() as client:
-                resp = await client.post(cancel_url, json={
+                resp = await client.post(action_response_url, json={
                     "replace_original": True,
                     "text": f"🗑 Meeting cancelled by <@{user_id}>",
                     "blocks": [
@@ -447,7 +444,6 @@ async def handle_cancel_meeting(
                 }, timeout=20)
             print(f"DEBUG replace_original: {resp.status_code} {resp.text}")
 
-        # Cancel Google Calendar event
         organiser = get_db_user(db, user_id)
         if organiser and record.calendar_event_id:
             cancel_calendar_event(organiser, record.calendar_event_id)
@@ -543,17 +539,14 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                     ]
                 })
 
-            
             # ── Cancel Meeting ──
             if action_id == "cancel_meeting":
                 event_id = value.get("event_id")
+
                 if not event_id:
                     return JSONResponse({})
 
                 action_response_url = payload.get("response_url")
-                clicker_user_id = payload["user"]["id"]
-                channel_id = value.get("channel_id") or payload["channel"]["id"]
-                bot_token = get_token(value["team_id"])
 
                 confirm_value = json.dumps({
                     "event_id": event_id,
@@ -568,41 +561,45 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                     "action_response_url": action_response_url,
                 })
 
-                await slack_api(bot_token, "chat.postEphemeral", {
-                    "channel": channel_id,
-                    "user": clicker_user_id,
-                    "text": "Are you sure you want to cancel this meeting?",
-                    "blocks": [
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": "🗑 *Are you sure you want to cancel this meeting?*\n\nThis will also delete the Google Calendar event."
-                            }
-                        },
-                        {
-                            "type": "actions",
-                            "elements": [
+                async with httpx.AsyncClient() as client:
+                    await client.post(
+                        action_response_url,
+                        json={
+                            "response_type": "ephemeral",
+                            "text": "Are you sure you want to cancel this meeting?",
+                            "blocks": [
                                 {
-                                    "type": "button",
-                                    "style": "danger",
-                                    "text": {"type": "plain_text", "text": "✅ Yes, cancel it"},
-                                    "action_id": "confirm_cancel_meeting",
-                                    "value": confirm_value
+                                    "type": "section",
+                                    "text": {
+                                        "type": "mrkdwn",
+                                        "text": "🗑 *Are you sure you want to cancel this meeting?*\n\nThis will also delete the Google Calendar event."
+                                    }
                                 },
                                 {
-                                    "type": "button",
-                                    "text": {"type": "plain_text", "text": "⬅️ No, keep it"},
-                                    "action_id": "dismiss_cancel",
-                                    "value": dismiss_value
+                                    "type": "actions",
+                                    "elements": [
+                                        {
+                                            "type": "button",
+                                            "style": "danger",
+                                            "text": {"type": "plain_text", "text": "✅ Yes, cancel it"},
+                                            "action_id": "confirm_cancel_meeting",
+                                            "value": confirm_value
+                                        },
+                                        {
+                                            "type": "button",
+                                            "text": {"type": "plain_text", "text": "⬅️ No, keep it"},
+                                            "action_id": "dismiss_cancel",
+                                            "value": dismiss_value
+                                        }
+                                    ]
                                 }
                             ]
-                        }
-                    ]
-                })
+                        },
+                        timeout=20
+                    )
 
-                return JSONResponse({})  
-            
+                return JSONResponse({})
+
             # ── Confirm Cancel ──
             if action_id == "confirm_cancel_meeting":
                 confirm_data = json.loads(action.get("value", "{}"))
