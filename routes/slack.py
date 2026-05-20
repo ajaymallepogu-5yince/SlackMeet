@@ -588,10 +588,15 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                                     "value": confirm_value
                                 },
                                 {
-                                    "type": "button",
-                                    "text": {"type": "plain_text", "text": "⬅️ No, keep it"},
-                                    "action_id": "dismiss_cancel",
-                                    "value": "{}"
+                                   "type": "button",
+                                   "text": {"type": "plain_text", "text": "⬅️ No, keep it"},
+                                   "action_id": "dismiss_cancel",
+                                   "value": json.dumps({
+                                   "event_id": event_id,
+                                   "user_id": value["user_id"],
+                                   "team_id": value["team_id"],
+                                   "action_response_url": action_response_url,
+                                       })
                                 }
                             ]
                         }
@@ -627,21 +632,73 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
     ]
 })
 
-            # ── Dismiss Cancel ──
+            # ── Dismiss Cancel — restore original meeting card ──
             if action_id == "dismiss_cancel":
-                return JSONResponse({
-    "replace_original": True,
-    "text": "👍 Meeting kept.",
-    "blocks": [
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "👍 *Meeting kept.*"
-            }
-        }
-    ]
-})
+                dismiss_data = json.loads(action.get("value", "{}"))
+                event_id = dismiss_data.get("event_id")
+                action_response_url = dismiss_data.get("action_response_url")
+
+                if event_id and action_response_url:
+                    db = SessionLocal()
+                    try:
+                        record = db.query(MeetingRecord).filter(
+                            MeetingRecord.event_id == event_id
+                        ).first()
+
+                        if record:
+                            action_value = json.dumps({
+                                "event_id": event_id,
+                                "user_id": dismiss_data["user_id"],
+                                "team_id": dismiss_data["team_id"],
+                                "channel_id": record.channel_id,
+                            })
+
+                            if record.start_time == "now":
+                                card_text = (
+                                    f"🚀 *Meeting Ready!*\n\n"
+                                    f"👤 Started by <@{record.user_id}>\n"
+                                    f"📞 {record.meet_link}"
+                                )
+                            else:
+                                card_text = (
+                                    f"📅 *Meeting Scheduled*\n\n"
+                                    f"📌 {record.title}\n"
+                                    f"🗓 {record.start_time}\n"
+                                    f"📞 {record.meet_link}"
+                                )
+
+                            restore_blocks = [
+                                {
+                                    "type": "section",
+                                    "text": {"type": "mrkdwn", "text": card_text}
+                                },
+                                {
+                                    "type": "actions",
+                                    "elements": [
+                                        {
+                                            "type": "button",
+                                            "style": "danger",
+                                            "text": {"type": "plain_text", "text": "🗑 Cancel Meeting"},
+                                            "action_id": "cancel_meeting",
+                                            "value": action_value
+                                        }
+                                    ]
+                                }
+                            ]
+
+                            async with httpx.AsyncClient() as client:
+                                await client.post(
+                                    action_response_url,
+                                    json={
+                                        "replace_original": True,
+                                        "blocks": restore_blocks,
+                                    },
+                                    timeout=20
+                                )
+                    finally:
+                        db.close()
+
+                return JSONResponse({})
             
             # ── Confirm Include Outsiders ──
             if action_id == "confirm_include_outsiders":
