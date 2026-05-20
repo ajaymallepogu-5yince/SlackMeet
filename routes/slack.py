@@ -451,7 +451,7 @@ async def handle_cancel_meeting(
                 }, timeout=20)
             print(f"DEBUG replace_original: {resp.status_code} {resp.text}")
 
-        # ── Cancel Google Calendar event ──
+        # ── Cancel Google Calendar event ── #
         organiser = get_db_user(db, user_id)
         if organiser and record.calendar_event_id:
             cancel_calendar_event(organiser, record.calendar_event_id)
