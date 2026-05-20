@@ -415,9 +415,8 @@ async def handle_cancel_meeting(
     event_id: str,
     user_id: str,
     team_id: str,
-    action_response_url: str = None,  # ← add this
+    action_response_url: str = None,
 ):
-    print(f"DEBUG handle_cancel_meeting START event_id={event_id}")  # ← ADD
     db = SessionLocal()
     try:
         record = db.query(MeetingRecord).filter(
@@ -428,11 +427,8 @@ async def handle_cancel_meeting(
             print(f"⚠️ Meeting {event_id} already cancelled")
             return
 
-        print(f"DEBUG action_response_url: {action_response_url}")
-
-        # ── Use action_response_url — points to the actual meeting card ──
-        cancel_url = action_response_url or record.response_url
-        print(f"DEBUG cancel_url: {cancel_url}")  # ← ADD
+        # ── Always use the saved response_url to update the meeting card ──
+        cancel_url = record.response_url  # ← NOT action_response_url
 
         if cancel_url:
             async with httpx.AsyncClient() as client:
@@ -451,15 +447,13 @@ async def handle_cancel_meeting(
                 }, timeout=20)
             print(f"DEBUG replace_original: {resp.status_code} {resp.text}")
 
-        # ── Cancel Google Calendar event ── #   
+        # Cancel Google Calendar event
         organiser = get_db_user(db, user_id)
         if organiser and record.calendar_event_id:
             cancel_calendar_event(organiser, record.calendar_event_id)
 
-
         db.delete(record)
         db.commit()
-        print(f"✅ Meeting cancelled: {event_id}")
 
     except Exception as e:
         print(f"🔥 Cancel Meeting ERROR: {e}")
