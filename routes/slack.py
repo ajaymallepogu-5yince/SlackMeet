@@ -550,20 +550,14 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                 })
 
             # ── Cancel Meeting ──
+            # ── Cancel Meeting ──
             if action_id == "cancel_meeting":
-                print(f"DEBUG cancel_meeting triggered")        # ← ADD
-                print(f"DEBUG value: {value}")  
                 event_id = value.get("event_id")
-                print(f"DEBUG event_id: {event_id}") 
                 if not event_id:
-                    print("DEBUG event_id is None — returning empty")  # ← ADD
                     return JSONResponse({})
 
-                # ── This points directly to the meeting card message ──
                 action_response_url = payload.get("response_url")
-                print(f"DEBUG action_response_url: {action_response_url}")
 
-                # define confirm_value before using it below
                 confirm_value = json.dumps({
                     "event_id": event_id,
                     "user_id": value["user_id"],
@@ -571,46 +565,40 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                     "action_response_url": action_response_url,
                 })
 
-                return JSONResponse({
-    "replace_original": True,
-    "text": "Cancel confirmation",
-    "blocks": [
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": (
-                    "🗑 *Are you sure you want to cancel this meeting?*\n\n"
-                    "This will also delete the Google Calendar event."
+                # ── Ephemeral confirmation — only visible to person who clicked ──
+                await respond_to_user(
+                    response_url=action_response_url,
+                    text="Are you sure?",
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "🗑 *Are you sure you want to cancel this meeting?*\n\nThis will also delete the Google Calendar event."
+                            }
+                        },
+                        {
+                            "type": "actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "style": "danger",
+                                    "text": {"type": "plain_text", "text": "✅ Yes, cancel it"},
+                                    "action_id": "confirm_cancel_meeting",
+                                    "value": confirm_value
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "⬅️ No, keep it"},
+                                    "action_id": "dismiss_cancel",
+                                    "value": "{}"
+                                }
+                            ]
+                        }
+                    ]
                 )
-            }
-        },
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "style": "danger",
-                    "text": {
-                        "type": "plain_text",
-                        "text": "✅ Yes, cancel it"
-                    },
-                    "action_id": "confirm_cancel_meeting",
-                    "value": confirm_value
-                },
-                {
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "text": "⬅️ No, keep it"
-                    },
-                    "action_id": "dismiss_cancel",
-                    "value": "{}"
-                }
-            ]
-        }
-    ]
-})
+
+                return JSONResponse({})  # ← empty response, meeting card stays untouched
 
             # ── Confirm Cancel ──
             if action_id == "confirm_cancel_meeting":
