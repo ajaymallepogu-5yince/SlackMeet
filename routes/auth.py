@@ -9,7 +9,7 @@ from models.user_token import UserToken
 
 router = APIRouter()
 
-_flows: dict[str, dict] = {}   # state -> {"flow": Flow, "response_url": str}
+_flows: dict[str, dict] = {}  # state -> {"flow": Flow, "response_url": str}
 
 
 def make_flow() -> Flow:
@@ -85,7 +85,7 @@ async def callback(request: Request):
     finally:
         db.close()
 
-    # ── Replace the "Connect Google" button with a success message in Slack ──
+    # ── Replace the Connect Google button with success message in Slack ──
     if response_url:
         try:
             async with httpx.AsyncClient() as client:
@@ -111,5 +111,4 @@ async def callback(request: Request):
         except Exception as e:
             print(f"⚠️ Failed to post auth success to Slack: {e}")
 
-    # Replace the HTMLResponse at the end of callback with this:
     return HTMLResponse("<script>window.close();</script>")

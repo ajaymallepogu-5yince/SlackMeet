@@ -743,6 +743,30 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                     ]
                 })
 
+            # ── Connect Google ──
+            if action_id == "connect_google":
+                action_response_url = payload.get("response_url")  # ← interaction's response_url
+                
+                auth_url = (
+                    f"{BASE_URL}/auth"
+                    f"?user_id={value['user_id']}"
+                    f"&team_id={value['team_id']}"
+                    f"&response_url={urllib.parse.quote(action_response_url, safe='')}"
+                )
+
+                return JSONResponse({
+                    "replace_original": True,
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"🔐 *Connecting Google account...*\n\n<{auth_url}|Click here to connect>"
+                            }
+                        }
+                    ]
+                })
+
         # ── Modal Submit ──
         if payload_type == "view_submission":
             view = payload.get("view", {})
@@ -857,12 +881,11 @@ async def handle_instant_meet(
         organiser = get_db_user(db, user_id)
 
         if not organiser:
-            auth_url = (
-               f"{BASE_URL}/auth"
-               f"?user_id={user_id}"
-               f"&team_id={team_id}"
-               f"&response_url={urllib.parse.quote(response_url, safe='')}"
-             )
+            auth_value = json.dumps({
+                "user_id": user_id,
+                "team_id": team_id,
+                "response_url": response_url,   # ← stored here so /actions can forward it
+            })
             await respond_to_user(
                 response_url=response_url,
                 text="Google connection required",
@@ -884,7 +907,8 @@ async def handle_instant_meet(
                                 "type": "button",
                                 "style": "primary",
                                 "text": {"type": "plain_text", "text": "🔗 Connect Google"},
-                                "url": auth_url
+                                "action_id": "connect_google",   # ← action_id, NOT url
+                                "value": auth_value
                             }
                         ]
                     }
@@ -980,12 +1004,11 @@ async def handle_instant_meet_confirmed(
 
         organiser = get_db_user(db, user_id)
         if not organiser:
-            auth_url = (
-               f"{BASE_URL}/auth"
-               f"?user_id={user_id}"
-               f"&team_id={team_id}"
-               f"&response_url={urllib.parse.quote(response_url, safe='')}"
-             )
+            auth_value = json.dumps({
+                "user_id": user_id,
+                "team_id": team_id,
+                "response_url": response_url,   # ← stored here so /actions can forward it
+            })
             await respond_to_user(
                 response_url=response_url,
                 text="Google connection required",
@@ -1004,7 +1027,8 @@ async def handle_instant_meet_confirmed(
                                 "type": "button",
                                 "style": "primary",
                                 "text": {"type": "plain_text", "text": "🔗 Connect Google"},
-                                "url": auth_url
+                                "action_id": "connect_google",   # ← action_id, NOT url
+                                "value": auth_value
                             }
                         ]
                     }
