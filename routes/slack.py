@@ -3,6 +3,7 @@ import re
 import uuid
 import httpx
 from datetime import datetime
+import urllib.parse
 
 from fastapi import APIRouter, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -856,7 +857,12 @@ async def handle_instant_meet(
         organiser = get_db_user(db, user_id)
 
         if not organiser:
-            auth_url = f"{BASE_URL}/auth?user_id={user_id}&team_id={team_id}"
+            auth_url = (
+               f"{BASE_URL}/auth"
+               f"?user_id={user_id}"
+               f"&team_id={team_id}"
+               f"&response_url={urllib.parse.quote(response_url, safe='')}"
+             )
             await respond_to_user(
                 response_url=response_url,
                 text="Google connection required",
@@ -974,7 +980,12 @@ async def handle_instant_meet_confirmed(
 
         organiser = get_db_user(db, user_id)
         if not organiser:
-            auth_url = f"{BASE_URL}/auth?user_id={user_id}&team_id={team_id}"
+            auth_url = (
+               f"{BASE_URL}/auth"
+               f"?user_id={user_id}"
+               f"&team_id={team_id}"
+               f"&response_url={urllib.parse.quote(response_url, safe='')}"
+             )
             await respond_to_user(
                 response_url=response_url,
                 text="Google connection required",

@@ -1,5 +1,6 @@
+import httpx
 from fastapi import APIRouter, Request
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.responses import RedirectResponse, HTMLResponse
 from google_auth_oauthlib.flow import Flow
 
 from core.config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, BASE_URL, GOOGLE_SCOPES
@@ -8,8 +9,7 @@ from models.user_token import UserToken
 
 router = APIRouter()
 
-# In-memory store of active flows keyed by "{team_id}:{user_id}"
-_flows: dict[str, Flow] = {}
+_flows: dict[str, dict] = {}   # state -> {"flow": Flow, "response_url": str}
 
 
 def make_flow() -> Flow:
@@ -28,7 +28,7 @@ def make_flow() -> Flow:
 
 
 @router.get("/auth")
-def auth(user_id: str, team_id: str = ""):
+def auth(user_id: str, team_id: str = "", response_url: str = ""):
     flow = make_flow()
     state = f"{team_id}:{user_id}"
     auth_url, _ = flow.authorization_url(
@@ -36,29 +36,32 @@ def auth(user_id: str, team_id: str = ""):
         access_type="offline",
         state=state,
     )
-    _flows[state] = flow
+    _flows[state] = {"flow": flow, "response_url": response_url}
     return RedirectResponse(auth_url)
 
 
 @router.get("/callback")
-def callback(request: Request):
+async def callback(request: Request):
     code = request.query_params.get("code")
     state = request.query_params.get("state", ":")
 
     try:
         team_id, user_id = state.split(":", 1)
     except ValueError:
-        return JSONResponse({"error": "Invalid state"}, status_code=400)
+        return HTMLResponse("<h2>❌ Invalid state.</h2>", status_code=400)
 
     if not user_id or not code:
-        return JSONResponse({"error": "Missing code or state"}, status_code=400)
+        return HTMLResponse("<h2>❌ Missing code or state.</h2>", status_code=400)
 
-    flow = _flows.pop(state, None)
-    if flow is None:
-        return JSONResponse(
-            {"error": "OAuth session expired. Please try /auth again."},
+    stored = _flows.pop(state, None)
+    if stored is None:
+        return HTMLResponse(
+            "<h2>❌ Session expired. Please click Connect Google again in Slack.</h2>",
             status_code=400,
         )
+
+    flow = stored["flow"]
+    response_url = stored.get("response_url", "")
 
     flow.fetch_token(code=code)
     credentials = flow.credentials
@@ -82,4 +85,31 @@ def callback(request: Request):
     finally:
         db.close()
 
-    return JSONResponse({"message": "✅ Google connected! You can close this tab and return to Slack."})
+    # ── Replace the "Connect Google" button with a success message in Slack ──
+    if response_url:
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    response_url,
+                    json={
+                        "replace_original": True,
+                        "blocks": [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": (
+                                        "✅ *Google account connected!*\n\n"
+                                        "You're all set. Try `/meet @user` again to start your meeting. 🚀"
+                                    )
+                                }
+                            }
+                        ]
+                    },
+                    timeout=10,
+                )
+        except Exception as e:
+            print(f"⚠️ Failed to post auth success to Slack: {e}")
+
+    # Replace the HTMLResponse at the end of callback with this:
+    return HTMLResponse("<script>window.close();</script>")
