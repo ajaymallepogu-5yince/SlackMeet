@@ -922,14 +922,12 @@ async def handle_instant_meet(
                         "type": "actions",
                         "elements": [
                             {
-                                "type": "button",
-                                "style": "primary",
-                                "text": {"type": "plain_text", "text": "🔗 Connect Google"},
-                                "action_id": "connect_google",   # ← now Slack fires /actions
-                                   "value": json.dumps({
-                                   "user_id": user_id,
-                                   "team_id": team_id,
-                                })
+                                {
+                                  "type": "button",
+                                  "style": "primary",
+                                  "text": {"type": "plain_text", "text": "🔗 Connect       Google"},
+                                  "url": auth_url    # ← already being built just above, use it
+                                }
 
                             }
                         ]
@@ -1047,14 +1045,12 @@ async def handle_instant_meet_confirmed(
                         "type": "actions",
                         "elements": [
                             {
-                                "type": "button",
-                                "style": "primary",
-                                "text": {"type": "plain_text", "text": "🔗 Connect Google"},
-                                "action_id": "connect_google",   # ← now Slack fires /actions
-                                "value": json.dumps({
-                                "user_id": user_id,
-                                "team_id": team_id,
-                              })
+                                {
+                                  "type": "button",
+                                  "style": "primary",
+                                  "text": {"type": "plain_text", "text": "🔗 Connect Google"},
+                                  "url": auth_url    # ← already being built just above, use it
+                                }
 
                             }
                         ]
