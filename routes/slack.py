@@ -763,27 +763,6 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                     ]
                 })
         
-            # ── Connect Google ──
-            if action_id == "connect_google":
-                action_response_url = payload.get("response_url")
-                auth_url = (
-                    f"{BASE_URL}/auth"
-                    f"?user_id={value['user_id']}"
-                    f"&team_id={value['team_id']}"
-                    f"&response_url={urllib.parse.quote(action_response_url, safe='')}"
-                )
-                return JSONResponse({
-                    "replace_original": True,
-                    "blocks": [
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": f"🔐 *Connecting Google account...*\n\n<{auth_url}|Click here to connect>"
-                            }
-                        }
-                    ]
-                })
         # ── Modal Submit ──
         if payload_type == "view_submission":
             view = payload.get("view", {})
