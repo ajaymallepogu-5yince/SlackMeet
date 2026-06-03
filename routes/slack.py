@@ -64,7 +64,7 @@ async def slack_api(bot_token: str, method: str, payload: dict):
             f"https://slack.com/api/{method}",
             headers={
                 "Authorization": f"Bearer {bot_token}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json; charset=utf-8"
             },
             json=payload,
             timeout=20
