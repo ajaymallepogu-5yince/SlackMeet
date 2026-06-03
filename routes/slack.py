@@ -264,6 +264,36 @@ async def validate_mentions_in_channel(
     return valid, outsiders
 
 # ─────────────────────────────────────────────────────────────────
+# DM Partner Detection
+# ─────────────────────────────────────────────────────────────────
+
+async def get_dm_partner(bot_token: str, channel_id: str, user_id: str) -> dict | None:
+    """If channel_id is a DM (starts with D), return the other person's member dict."""
+    if not channel_id or not channel_id.startswith("D"):
+        return None
+
+    result = await slack_api(bot_token, "conversations.members", {
+        "channel": channel_id
+    })
+
+    members_ids = result.get("members", [])
+    # Filter out the calling user — the other one is the DM partner
+    partner_ids = [m for m in members_ids if m != user_id]
+
+    if not partner_ids:
+        return None
+
+    partner_id = partner_ids[0]
+
+    # Resolve to full member dict
+    all_members = await get_all_members(bot_token)
+    for m in all_members:
+        if m.get("id") == partner_id:
+            return m
+
+    return None
+
+# ─────────────────────────────────────────────────────────────────
 # Slash Command
 # ─────────────────────────────────────────────────────────────────
 
@@ -280,53 +310,40 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
 
         print(f"DEBUG /meet user={user_id} channel={channel_id} text={text}")
 
-        # ── 1. Return instantly for empty text ──
         if not text:
-            return JSONResponse({
-                "response_type": "ephemeral",
-                "text": "👋 Try: `/meet @someone`",
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": (
-                                "👋 *How to use MeetNow:*\n\n"
-                                "• `/meet @user` — shows Connect Now / Schedule Later\n"
-                                "• `/meet @user lets connect` — starts instant meeting\n"
-                                "• `/meet @user1 @user2` — meeting with multiple people\n\n"
-                                "💡 *Try:* `/meet @someone`"
-                            )
-                        }
-                    }
-                ]
-            })
+            if channel_id and channel_id.startswith("D"):
+                pass  # fall through to auto-detect below
+            else:
+                return JSONResponse({
+                    "response_type": "ephemeral",
+                    "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": "👋 *How to use MeetNow:*\n\n• `/meet @user` — shows Connect Now / Schedule Later\n• `/meet @user lets connect` — starts instant meeting\n• `/meet @user1 @user2` — meeting with multiple people\n\n💡 *Try:* `/meet @someone`"}}]
+                })
 
         # ── 2. Extract mentions from text ──
         mentions = extract_mentions(text)
+
+        # ── 3. No mentions — try auto-detect DM partner ──
+        if not mentions:
+            if channel_id and channel_id.startswith("D"):
+                bot_token = get_token(team_id)
+                partner = await get_dm_partner(bot_token, channel_id, user_id)
+
+                if partner:
+                    partner_id = partner.get("id")
+                    mentions = [(partner_id, "")]
+                else:
+                    return JSONResponse({
+                        "response_type": "ephemeral",
+                        "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": "👋 *How to use MeetNow:*\n\n• `/meet @user` — shows Connect Now / Schedule Later\n• `/meet @user lets connect` — starts instant meeting\n• `/meet @user1 @user2` — meeting with multiple people\n\n💡 *Try:* `/meet @someone`"}}]
+                    })
+            else:
+                return JSONResponse({
+                    "response_type": "ephemeral",
+                    "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": "👋 *How to use MeetNow:*\n\n• `/meet @user` — shows Connect Now / Schedule Later\n• `/meet @user lets connect` — starts instant meeting\n• `/meet @user1 @user2` — meeting with multiple people\n\n💡 *Try:* `/meet @someone`"}}]
+                })
+
         uid = mentions[0][0] if mentions else None
         uname = mentions[0][1] if mentions else None
-
-        # ── 3. No mentions found — show helper ──
-        if not mentions:
-            return JSONResponse({
-                "response_type": "ephemeral",
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": (
-                                "👋 *How to use MeetNow:*\n\n"
-                                "• `/meet @user` — shows Connect Now / Schedule Later\n"
-                                "• `/meet @user lets connect` — starts instant meeting\n"
-                                "• `/meet @user1 @user2` — meeting with multiple people\n\n"
-                                "💡 *Try:* `/meet @someone`"
-                            )
-                        }
-                    }
-                ]
-            })
 
         # ── 4. Check instant keywords ──
         instant_keywords = [
@@ -335,7 +352,11 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
             "lets go", "let's go", "talk", "lets talk", "let's talk",
         ]
         normalized_text = text.lower()
-        should_start_instant = any(k in normalized_text for k in instant_keywords)
+
+        original_mentions = extract_mentions(text)
+        # CORRECT — only fires when user typed keywords without @mention
+        dm_no_mention = bool(text) and channel_id.startswith("D") and not original_mentions
+        should_start_instant = any(k in normalized_text for k in instant_keywords) or dm_no_mention
 
         if should_start_instant:
             background_tasks.add_task(
@@ -353,7 +374,6 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
 
         # ── 5. Show Connect Now / Schedule Later buttons ──
         shared_session_id = str(uuid.uuid4())
-
         mentions_display = " ".join([f"<@{u}>" for u, _ in mentions if u])
 
         shared_value = json.dumps({
@@ -742,7 +762,28 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                         }
                     ]
                 })
-
+        
+            # ── Connect Google ──
+            if action_id == "connect_google":
+                action_response_url = payload.get("response_url")
+                auth_url = (
+                    f"{BASE_URL}/auth"
+                    f"?user_id={value['user_id']}"
+                    f"&team_id={value['team_id']}"
+                    f"&response_url={urllib.parse.quote(action_response_url, safe='')}"
+                )
+                return JSONResponse({
+                    "replace_original": True,
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"🔐 *Connecting Google account...*\n\n<{auth_url}|Click here to connect>"
+                            }
+                        }
+                    ]
+                })
         # ── Modal Submit ──
         if payload_type == "view_submission":
             view = payload.get("view", {})
@@ -884,7 +925,12 @@ async def handle_instant_meet(
                                 "type": "button",
                                 "style": "primary",
                                 "text": {"type": "plain_text", "text": "🔗 Connect Google"},
-                                "url": auth_url
+                                "action_id": "connect_google",   # ← now Slack fires /actions
+                                   "value": json.dumps({
+                                   "user_id": user_id,
+                                   "team_id": team_id,
+                                })
+
                             }
                         ]
                     }
@@ -1004,7 +1050,12 @@ async def handle_instant_meet_confirmed(
                                 "type": "button",
                                 "style": "primary",
                                 "text": {"type": "plain_text", "text": "🔗 Connect Google"},
-                                "url": auth_url
+                                "action_id": "connect_google",   # ← now Slack fires /actions
+                                "value": json.dumps({
+                                "user_id": user_id,
+                                "team_id": team_id,
+                              })
+
                             }
                         ]
                     }
