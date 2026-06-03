@@ -280,8 +280,26 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
 
         print(f"DEBUG /meet user={user_id} channel={channel_id} text={text}")
 
-        # ── 1. Return instantly for empty text ──
-        if not text:
+        # ── 1. Extract manual mentions if any ──
+        mentions = extract_mentions(text)
+        is_dm = channel_id and channel_id.startswith("D")
+
+        # ── 2. NEW: Auto-detect partner in 1-on-1 DM ──
+        if not mentions and is_dm:
+            bot_token = get_token(team_id)
+            # Find everyone in this DM
+            res = await slack_api(bot_token, "conversations.members", {"channel": channel_id})
+            members = res.get("members", [])
+            
+            # Filter out the person typing the command
+            other_members = [m for m in members if m != user_id]
+            
+            # If we found the other person, inject them as our target!
+            if other_members:
+                mentions = [(other_members[0], "")]
+
+        # ── 3. Still no mentions? (Must be a Channel) -> Show helper ──
+        if not mentions:
             return JSONResponse({
                 "response_type": "ephemeral",
                 "text": "👋 Try: `/meet @someone`",
@@ -302,33 +320,11 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
                 ]
             })
 
-        # ── 2. Extract mentions from text ──
-        mentions = extract_mentions(text)
+        # Set uid and uname based on our mentions array (manual or auto-detected)
         uid = mentions[0][0] if mentions else None
         uname = mentions[0][1] if mentions else None
 
-        # ── 3. No mentions found — show helper ──
-        if not mentions:
-            return JSONResponse({
-                "response_type": "ephemeral",
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": (
-                                "👋 *How to use MeetNow:*\n\n"
-                                "• `/meet @user` — shows Connect Now / Schedule Later\n"
-                                "• `/meet @user lets connect` — starts instant meeting\n"
-                                "• `/meet @user1 @user2` — meeting with multiple people\n\n"
-                                "💡 *Try:* `/meet @someone`"
-                            )
-                        }
-                    }
-                ]
-            })
-
-        # ── 4. Check instant keywords ──
+        # ── 4. Check keywords for Instant Meeting ──
         instant_keywords = [
             "lets connect", "let's connect", "connect", "call",
             "lets meet", "let's meet", "meet", "instant meeting",
@@ -343,7 +339,7 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
                 user_id,
                 team_id,
                 channel_id,
-                mentions,
+                mentions, # This now contains our auto-detected DM partner!
                 response_url,
             )
             return JSONResponse({
@@ -405,7 +401,6 @@ async def meet(request: Request, background_tasks: BackgroundTasks):
     except Exception as e:
         print("🔥 /meet ERROR:", str(e))
         return JSONResponse({"response_type": "ephemeral", "text": "Something went wrong."})
-
 
 
 # ─────────────────────────────────────────────────────────────────

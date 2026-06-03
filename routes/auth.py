@@ -92,7 +92,9 @@ async def callback(request: Request):
                 await client.post(
                     response_url,
                     json={
-                        "replace_original": True,
+                        "response_type": "ephemeral", # 👈 Ensures it targets the hidden message
+                        "replace_original": True,     # 👈 Deletes the Connect Google button
+                        "text": "✅ Google account connected!",
                         "blocks": [
                             {
                                 "type": "section",
@@ -100,7 +102,7 @@ async def callback(request: Request):
                                     "type": "mrkdwn",
                                     "text": (
                                         "✅ *Google account connected!*\n\n"
-                                        "You're all set. Try `/meet @user` again to start your meeting. 🚀"
+                                        "You're all set. Try `/meet` again to start your meeting. 🚀"
                                     )
                                 }
                             }
