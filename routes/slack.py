@@ -58,10 +58,23 @@ def get_token(team_id: str):
 # Slack API
 # ─────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────
+# Slack API
+# ─────────────────────────────────────────────────────────────────
+
 async def slack_api(bot_token: str, method: str, payload: dict):
+    url = f"https://slack.com/api/{method}"
+    
+    # ── NEW: Slack ignores JSON bodies for GET-oriented endpoints. ──
+    # We must pass their arguments as URL query parameters instead.
+    if method in ("conversations.members", "users.list") and payload:
+        query_string = urllib.parse.urlencode(payload)
+        url = f"{url}?{query_string}"
+        payload = {}  # Empty the body so Slack reads the URL parameters
+
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            f"https://slack.com/api/{method}",
+            url,
             headers={
                 "Authorization": f"Bearer {bot_token}",
                 "Content-Type": "application/json; charset=utf-8"
@@ -69,6 +82,7 @@ async def slack_api(bot_token: str, method: str, payload: dict):
             json=payload,
             timeout=20
         )
+        
     data = response.json()
     if not data.get("ok"):
         print(f"🔥 Slack API Error {method}: {data}")
